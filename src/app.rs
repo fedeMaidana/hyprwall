@@ -30,10 +30,10 @@ use wayland_client::{
 
 use crate::{
     font::load_ui_font,
-    layout::{self, Layout},
-    render::draw_background,
+    picker::Picker,
+    render::{build_scene, rasterize},
     style,
-    wallpaper::{Wallpaper, apply_wallpaper, current_wallpaper_path, scan_wallpapers},
+    wallpaper::scan_wallpapers,
 };
 
 pub struct AppState {
@@ -57,12 +57,8 @@ pub struct AppState {
     keyboard_focus: bool,
     pointer: Option<wl_pointer::WlPointer>,
 
-    wallpapers: Vec<Wallpaper>,
+    picker: Picker,
     font: Font,
-    selected: usize,
-    first_visible: usize,
-    hovered: Option<usize>,
-    last_layout: Layout,
 }
 
 impl AppState {
@@ -80,8 +76,7 @@ impl AppState {
 
         log::info!("loaded {} wallpapers", wallpapers.len());
 
-        let selected = initial_selected_wallpaper(&wallpapers);
-
+        let picker = Picker::with_current_wallpaper(wallpapers);
         let font = load_ui_font()?;
 
         let conn = Connection::connect_to_env().context("no se pudo conectar a Wayland")?;
@@ -135,12 +130,8 @@ impl AppState {
             keyboard_focus: false,
             pointer: None,
 
-            wallpapers,
+            picker,
             font,
-            selected,
-            first_visible: selected,
-            hovered: None,
-            last_layout: Layout::empty(),
         };
 
         while !app.configured {
@@ -177,15 +168,20 @@ impl AppState {
         let height = self.height.max(1);
         let stride = width as i32 * 4;
 
-        let layout = self.compute_layout();
-        self.last_layout = layout.clone();
+        let layout = self
+            .picker
+            .recompute_layout(self.width, self.height)
+            .clone();
 
-        let app_width = self.width;
-        let app_height = self.height;
-        let selected = self.selected;
-        let hovered = self.hovered;
-        let wallpapers = &self.wallpapers;
-        let font = &self.font;
+        let scene = build_scene(
+            self.width,
+            self.height,
+            &layout,
+            self.picker.wallpapers(),
+            self.picker.selected(),
+            self.picker.hovered(),
+        );
+
         let wl_surface = self.layer.wl_surface().clone();
 
         let Ok((buffer, canvas)) = self.pool.create_buffer(
@@ -200,10 +196,7 @@ impl AppState {
 
         canvas.fill(0);
 
-        draw_background(
-            canvas, width, height, app_width, app_height, &layout, wallpapers, selected, hovered,
-            font,
-        );
+        rasterize(canvas, width, height, &scene, &self.font);
 
         wl_surface.damage_buffer(0, 0, width as i32, height as i32);
 
@@ -215,47 +208,18 @@ impl AppState {
         self.layer.commit();
     }
 
-    fn compute_layout(&mut self) -> Layout {
-        layout::compute(
-            self.width,
-            self.height,
-            self.wallpapers.len(),
-            self.selected,
-            &mut self.first_visible,
-        )
-    }
-
-    fn select_prev(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-        } else {
-            self.selected = self.wallpapers.len() - 1;
-        }
-    }
-
-    fn select_next(&mut self) {
-        self.selected = (self.selected + 1) % self.wallpapers.len();
-    }
-
     fn apply_selected(&mut self) {
-        let wallpaper = &self.wallpapers[self.selected];
+        let current_path = self.picker.current().path.clone();
 
-        match apply_wallpaper(&wallpaper.path) {
+        match self.picker.apply_current() {
             Ok(()) => {
-                log::info!("wallpaper aplicado: {}", wallpaper.path.display());
+                log::info!("wallpaper aplicado: {}", current_path.display());
                 self.should_close = true;
             }
             Err(err) => {
-                log::error!("no se pudo aplicar {}: {err:?}", wallpaper.path.display());
+                log::error!("no se pudo aplicar {}: {err:?}", current_path.display());
             }
         }
-    }
-
-    fn wallpaper_at(&self, x: f64, y: f64) -> Option<usize> {
-        self.last_layout
-            .cards
-            .iter()
-            .find_map(|(idx, rect)| rect.contains(x, y).then_some(*idx))
     }
 }
 
@@ -466,7 +430,7 @@ impl KeyboardHandler for AppState {
         _: u32,
         event: KeyEvent,
     ) {
-        let mut changed_selection = false;
+        let mut changed = false;
 
         match event.keysym {
             Keysym::Escape => {
@@ -478,17 +442,15 @@ impl KeyboardHandler for AppState {
                 return;
             }
             Keysym::Left => {
-                self.select_prev();
-                changed_selection = true;
+                changed = self.picker.select_prev();
             }
             Keysym::Right => {
-                self.select_next();
-                changed_selection = true;
+                changed = self.picker.select_next();
             }
             _ => {}
         }
 
-        if !changed_selection {
+        if !changed {
             if let Some(text) = event.utf8.as_deref() {
                 match text.to_lowercase().as_str() {
                     "q" => {
@@ -496,12 +458,10 @@ impl KeyboardHandler for AppState {
                         return;
                     }
                     "h" | "a" => {
-                        self.select_prev();
-                        changed_selection = true;
+                        changed = self.picker.select_prev();
                     }
                     "l" | "d" => {
-                        self.select_next();
-                        changed_selection = true;
+                        changed = self.picker.select_next();
                     }
                     " " => {
                         self.apply_selected();
@@ -512,7 +472,7 @@ impl KeyboardHandler for AppState {
             }
         }
 
-        if changed_selection {
+        if changed {
             self.request_redraw(qh);
         }
     }
@@ -570,19 +530,18 @@ impl PointerHandler for AppState {
 
             match event.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
-                    let new_hover = self.wallpaper_at(x, y);
-                    if self.hovered != new_hover {
-                        self.hovered = new_hover;
+                    if self.picker.hover_at(x, y) {
                         needs_redraw = true;
                     }
                 }
                 PointerEventKind::Leave { .. } => {
-                    self.hovered = None;
-                    needs_redraw = true;
+                    if self.picker.clear_hover() {
+                        needs_redraw = true;
+                    }
                 }
                 PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
-                    if let Some(index) = self.wallpaper_at(x, y) {
-                        self.selected = index;
+                    if let Some(index) = self.picker.wallpaper_at(x, y) {
+                        self.picker.select_index(index);
                         self.apply_selected();
                     }
                 }
@@ -618,20 +577,3 @@ delegate_keyboard!(AppState);
 delegate_pointer!(AppState);
 delegate_layer!(AppState);
 delegate_registry!(AppState);
-
-fn initial_selected_wallpaper(wallpapers: &[Wallpaper]) -> usize {
-    let Some(current_path) = current_wallpaper_path() else {
-        return 0;
-    };
-
-    let current_path = normalize_path(&current_path);
-
-    wallpapers
-        .iter()
-        .position(|wallpaper| normalize_path(&wallpaper.path) == current_path)
-        .unwrap_or(0)
-}
-
-fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}

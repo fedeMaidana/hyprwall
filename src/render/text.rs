@@ -2,10 +2,13 @@ use fontdue::Font;
 
 use crate::{
     geometry::Rect,
-    render::primitives::{blend_pixel, scale_alpha},
     style::{self, Color},
 };
 
+/// Pinta el texto centrado dentro de `rect`, recortándolo con elipsis si no
+/// entra. Trabaja sobre un buffer **RGBA** (orden de bytes R, G, B, A — el de
+/// `tiny_skia::Pixmap::data_mut()`). El swap a BGRA para Wayland lo hace el
+/// rasterizer al final, no acá.
 pub fn draw_text_centered_in_rect(
     canvas: &mut [u8],
     surface_w: u32,
@@ -67,7 +70,7 @@ fn draw_text_baseline(
                     continue;
                 }
 
-                blend_pixel(
+                blend_pixel_rgba(
                     canvas,
                     surface_w,
                     px,
@@ -127,4 +130,41 @@ fn fit_text_to_width(font: &Font, text: &str, font_size: f32, max_width: f32) ->
 
     fitted.push('…');
     fitted
+}
+
+fn scale_alpha(alpha: u8, coverage: u8) -> u8 {
+    ((alpha as u16 * coverage as u16) / 255) as u8
+}
+
+/// Source-over blend de un pixel RGBA sobre el canvas RGBA. Alpha
+/// non-premultiplied; el resultado queda premultiplicado-equivalente porque
+/// la salida de tiny-skia que rodea estos pixels también lo está para alpha=255
+/// (típico). Suficiente para texto sobre fondos opacos.
+fn blend_pixel_rgba(canvas: &mut [u8], surface_w: u32, x: i32, y: i32, color: Color) {
+    if color.a == 0 || x < 0 || y < 0 {
+        return;
+    }
+
+    let idx = ((y as u32 * surface_w + x as u32) * 4) as usize;
+    if idx + 3 >= canvas.len() {
+        return;
+    }
+
+    let dst_r = canvas[idx] as u16;
+    let dst_g = canvas[idx + 1] as u16;
+    let dst_b = canvas[idx + 2] as u16;
+    let dst_a = canvas[idx + 3] as u16;
+
+    let a = color.a as u16;
+    let inv_a = 255 - a;
+
+    let out_r = (color.r as u16 * a + dst_r * inv_a) / 255;
+    let out_g = (color.g as u16 * a + dst_g * inv_a) / 255;
+    let out_b = (color.b as u16 * a + dst_b * inv_a) / 255;
+    let out_a = a + (dst_a * inv_a) / 255;
+
+    canvas[idx] = out_r as u8;
+    canvas[idx + 1] = out_g as u8;
+    canvas[idx + 2] = out_b as u8;
+    canvas[idx + 3] = out_a as u8;
 }

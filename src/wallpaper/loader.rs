@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use image::imageops::FilterType;
-use std::{fs, path::Path};
+use rayon::prelude::*;
+use std::{fs, path::Path, time::Instant};
 
 use crate::{
     style,
@@ -21,14 +22,27 @@ pub fn scan_wallpapers(dir: &Path) -> Result<Vec<Wallpaper>> {
 
     paths.sort_by_key(|path| path.file_name().map(|name| name.to_owned()));
 
-    let mut wallpapers = Vec::new();
+    let start = Instant::now();
 
-    for path in paths {
-        match load_wallpaper(&path) {
-            Ok(wallpaper) => wallpapers.push(wallpaper),
-            Err(err) => log::warn!("ignorando {}: {err:?}", path.display()),
-        }
-    }
+    // par_iter().filter_map().collect() preserva el orden del iterador fuente,
+    // así que los wallpapers salen en el mismo orden alfabético que tenían las
+    // paths, no en orden de finalización.
+    let wallpapers: Vec<Wallpaper> = paths
+        .par_iter()
+        .filter_map(|path| match load_wallpaper(path) {
+            Ok(wallpaper) => Some(wallpaper),
+            Err(err) => {
+                log::warn!("ignorando {}: {err:?}", path.display());
+                None
+            }
+        })
+        .collect();
+
+    log::debug!(
+        "decoded {} wallpapers in {:.2?}",
+        wallpapers.len(),
+        start.elapsed()
+    );
 
     Ok(wallpapers)
 }

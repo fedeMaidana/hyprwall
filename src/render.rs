@@ -1,5 +1,6 @@
-mod primitives;
+mod rasterizer;
+mod scene;
 mod text;
-mod view;
 
-pub use view::draw_background;
+pub use rasterizer::rasterize;
+pub use scene::build_scene;

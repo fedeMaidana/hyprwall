@@ -11,13 +11,7 @@ impl Layout {
     }
 }
 
-pub fn compute(
-    width: u32,
-    height: u32,
-    wallpaper_count: usize,
-    selected: usize,
-    first_visible: &mut usize,
-) -> Layout {
+pub fn compute(width: u32, height: u32, wallpaper_count: usize, selected: usize) -> Layout {
     if wallpaper_count == 0 {
         return Layout::empty();
     }
@@ -26,7 +20,6 @@ pub fn compute(
     let height = height as i32;
 
     let selected = selected.min(wallpaper_count - 1);
-    *first_visible = selected;
 
     let active_w = style::card::WIDTH;
     let active_h = style::card::HEIGHT;

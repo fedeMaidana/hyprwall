@@ -5,6 +5,7 @@ mod cli;
 mod font;
 mod geometry;
 mod layout;
+mod picker;
 mod render;
 mod style;
 mod wallpaper;

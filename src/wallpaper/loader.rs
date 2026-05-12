@@ -50,12 +50,11 @@ pub fn scan_wallpapers(dir: &Path) -> Result<Vec<Wallpaper>> {
 pub fn load_wallpaper(path: &Path) -> Result<Wallpaper> {
     let image = image::open(path).with_context(|| format!("image::open {}", path.display()))?;
 
+    let decode_w = style::card::WIDTH as u32 * style::card::THUMB_DECODE_SCALE;
+    let decode_h = style::card::HEIGHT as u32 * style::card::THUMB_DECODE_SCALE;
+
     let thumb = image
-        .resize_to_fill(
-            style::card::WIDTH as u32,
-            style::card::HEIGHT as u32,
-            FilterType::Lanczos3,
-        )
+        .resize_to_fill(decode_w, decode_h, FilterType::Lanczos3)
         .to_rgba8();
 
     Ok(Wallpaper {

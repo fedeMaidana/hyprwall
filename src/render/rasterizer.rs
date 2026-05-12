@@ -1,7 +1,7 @@
 use fontdue::Font;
 use tiny_skia::{
-    FillRule, GradientStop, LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
-    PixmapRef, Point, SpreadMode, Transform,
+    FillRule, FilterQuality, GradientStop, LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap,
+    PixmapPaint, PixmapRef, Point, SpreadMode, Transform,
 };
 
 use crate::{
@@ -21,7 +21,18 @@ const CIRCLE_KAPPA: f32 = 0.5522847498307933;
 /// Walks a Scene in order and produces an RGBA8888 image, then copies it
 /// into `canvas` doing the channel swap RGBA → BGRA that Wayland's
 /// `Argb8888` format expects (little-endian => BGRA in memory).
-pub fn rasterize(canvas: &mut [u8], width: u32, height: u32, scene: &Scene<'_>, font: &Font) {
+///
+/// `width` and `height` are **physical** pixels of the output buffer.
+/// `scale` is the HiDPI factor (typically 1.0 or 2.0). The scene comes in
+/// logical pixels; each DrawCmd is scaled to physical before being drawn.
+pub fn rasterize(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    scale: f32,
+    scene: &Scene<'_>,
+    font: &Font,
+) {
     let Some(mut pixmap) = Pixmap::new(width, height) else {
         log::error!("no se pudo crear tiny-skia Pixmap {width}x{height}");
         return;
@@ -30,7 +41,7 @@ pub fn rasterize(canvas: &mut [u8], width: u32, height: u32, scene: &Scene<'_>, 
     // pixmap arranca transparent (zeroed).
 
     for cmd in &scene.commands {
-        match *cmd {
+        match scale_cmd(cmd, scale) {
             DrawCmd::RoundRect {
                 rect,
                 radius,
@@ -78,6 +89,73 @@ pub fn rasterize(canvas: &mut [u8], width: u32, height: u32, scene: &Scene<'_>, 
 
     // Pixmap está en RGBA. Wayland Argb8888 little-endian = BGRA en memoria.
     copy_rgba_to_bgra(canvas, pixmap.data());
+}
+
+/// Convierte un DrawCmd en coordenadas lógicas a otro en coordenadas físicas
+/// multiplicando posiciones, dimensiones, radios y font sizes por `scale`.
+/// Cuando scale = 1.0 es el caso degenerado y no toca nada.
+fn scale_cmd<'a>(cmd: &DrawCmd<'a>, scale: f32) -> DrawCmd<'a> {
+    match *cmd {
+        DrawCmd::RoundRect {
+            rect,
+            radius,
+            corners,
+            color,
+        } => DrawCmd::RoundRect {
+            rect: scale_rect(rect, scale),
+            radius: scale_len(radius, scale),
+            corners,
+            color,
+        },
+        DrawCmd::VerticalGradient {
+            rect,
+            radius,
+            corners,
+            bottom_color,
+            top_alpha,
+        } => DrawCmd::VerticalGradient {
+            rect: scale_rect(rect, scale),
+            radius: scale_len(radius, scale),
+            corners,
+            bottom_color,
+            top_alpha,
+        },
+        DrawCmd::Thumbnail {
+            rect,
+            radius,
+            corners,
+            thumb,
+        } => DrawCmd::Thumbnail {
+            rect: scale_rect(rect, scale),
+            radius: scale_len(radius, scale),
+            corners,
+            thumb,
+        },
+        DrawCmd::Text {
+            rect,
+            text,
+            font_size,
+            color,
+        } => DrawCmd::Text {
+            rect: scale_rect(rect, scale),
+            text,
+            font_size: font_size * scale,
+            color,
+        },
+    }
+}
+
+fn scale_rect(r: Rect, scale: f32) -> Rect {
+    Rect {
+        x: (r.x as f32 * scale).round() as i32,
+        y: (r.y as f32 * scale).round() as i32,
+        w: (r.w as f32 * scale).round() as i32,
+        h: (r.h as f32 * scale).round() as i32,
+    }
+}
+
+fn scale_len(v: i32, scale: f32) -> i32 {
+    (v as f32 * scale).round() as i32
 }
 
 fn fill_round_rect(pixmap: &mut Pixmap, rect: Rect, radius: i32, corners: Corners, color: Color) {
@@ -188,14 +266,16 @@ fn draw_thumbnail(
     };
     mask.fill_path(&clip, FillRule::Winding, true, Transform::identity());
 
-    pixmap.draw_pixmap(
-        0,
-        0,
-        thumb_ref,
-        &PixmapPaint::default(),
-        transform,
-        Some(&mask),
-    );
+    // Bilinear sampling: cubre los casos donde el thumb decodificado y el
+    // rect de destino no calzan exactamente (pantallas 1× downscale el thumb
+    // 2×, pantallas 3× lo upscale). El default es Nearest, que produce
+    // artefactos visibles en cualquier scale != 1.0.
+    let paint = PixmapPaint {
+        quality: FilterQuality::Bilinear,
+        ..PixmapPaint::default()
+    };
+
+    pixmap.draw_pixmap(0, 0, thumb_ref, &paint, transform, Some(&mask));
 }
 
 /// Construye un path de rectángulo con esquinas redondeadas selectivas.
@@ -295,23 +375,38 @@ mod tests {
     /// Render visual a PNG: corré con
     ///   WALL_DIR=/tmp/bench_wallpapers cargo test --release render_dump_png -- --ignored --nocapture
     /// Genera /tmp/hyprwall_render.png con el picker contra el directorio.
+    /// SCALE=2 para simular pantalla HiDPI.
     #[test]
     #[ignore]
     fn render_dump_png() {
         let dir = std::env::var("WALL_DIR").unwrap_or_else(|_| "/tmp/bench_wallpapers".into());
         let out = std::env::var("WALL_OUT").unwrap_or_else(|_| "/tmp/hyprwall_render.png".into());
+        let scale: f32 = std::env::var("SCALE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1.0);
 
         let wallpapers = scan_wallpapers(Path::new(&dir)).expect("scan_wallpapers");
         assert!(!wallpapers.is_empty(), "directorio sin wallpapers válidos");
         let font = load_ui_font().expect("font");
 
-        let (w, h) = (1280u32, 560u32);
-        let selected = 0;
-        let layout = layout::compute(w, h, wallpapers.len(), selected);
-        let scene = build_scene(w, h, &layout, &wallpapers, selected, Some(2));
+        let (logical_w, logical_h) = (1280u32, 560u32);
+        let phys_w = (logical_w as f32 * scale).round() as u32;
+        let phys_h = (logical_h as f32 * scale).round() as u32;
 
-        let mut canvas = vec![0u8; (w * h * 4) as usize];
-        rasterize(&mut canvas, w, h, &scene, &font);
+        let selected = 0;
+        let layout = layout::compute(logical_w, logical_h, wallpapers.len(), selected);
+        let scene = build_scene(
+            logical_w,
+            logical_h,
+            &layout,
+            &wallpapers,
+            selected,
+            Some(2),
+        );
+
+        let mut canvas = vec![0u8; (phys_w * phys_h * 4) as usize];
+        rasterize(&mut canvas, phys_w, phys_h, scale, &scene, &font);
 
         // canvas viene BGRA premultiplied-ish. Para inspeccionar visualmente,
         // hacemos swap a RGBA y compositamos sobre fondo gris para que
@@ -327,9 +422,9 @@ mod tests {
             d[3] = 255;
         }
 
-        let int_size = tiny_skia::IntSize::from_wh(w, h).unwrap();
+        let int_size = tiny_skia::IntSize::from_wh(phys_w, phys_h).unwrap();
         let pixmap = Pixmap::from_vec(rgba, int_size).expect("from_vec");
         pixmap.save_png(&out).expect("save_png");
-        eprintln!("wrote {out}");
+        eprintln!("wrote {out} ({phys_w}x{phys_h} @ scale={scale})");
     }
 }

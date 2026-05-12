@@ -48,6 +48,10 @@ pub struct AppState {
 
     width: u32,
     height: u32,
+    /// HiDPI buffer scale factor. 1 = standard, 2 = retina, etc.
+    /// Updated when the surface enters an output via
+    /// `CompositorHandler::scale_factor_changed`.
+    scale: i32,
     configured: bool,
     should_close: bool,
     needs_redraw: bool,
@@ -121,6 +125,7 @@ impl AppState {
 
             width: style::surface::WIDTH_HINT,
             height: style::surface::HEIGHT_HINT,
+            scale: 1,
             configured: false,
             should_close: false,
             needs_redraw: false,
@@ -164,18 +169,23 @@ impl AppState {
     }
 
     fn render_now(&mut self) {
-        let width = self.width.max(1);
-        let height = self.height.max(1);
-        let stride = width as i32 * 4;
+        // Tamaño lógico (lo que reporta el compositor en configure).
+        let logical_w = self.width.max(1);
+        let logical_h = self.height.max(1);
 
-        let layout = self
-            .picker
-            .recompute_layout(self.width, self.height)
-            .clone();
+        // Tamaño físico del buffer SHM. El compositor escala el buffer al
+        // viewport del output respetando este factor; pintar al tamaño físico
+        // evita la borrosidad de que el compositor escale un buffer 1×.
+        let scale = self.scale.max(1) as u32;
+        let phys_w = logical_w * scale;
+        let phys_h = logical_h * scale;
+        let stride = phys_w as i32 * 4;
+
+        let layout = self.picker.recompute_layout(logical_w, logical_h).clone();
 
         let scene = build_scene(
-            self.width,
-            self.height,
+            logical_w,
+            logical_h,
             &layout,
             self.picker.wallpapers(),
             self.picker.selected(),
@@ -185,8 +195,8 @@ impl AppState {
         let wl_surface = self.layer.wl_surface().clone();
 
         let Ok((buffer, canvas)) = self.pool.create_buffer(
-            width as i32,
-            height as i32,
+            phys_w as i32,
+            phys_h as i32,
             stride,
             wl_shm::Format::Argb8888,
         ) else {
@@ -196,9 +206,11 @@ impl AppState {
 
         canvas.fill(0);
 
-        rasterize(canvas, width, height, &scene, &self.font);
+        rasterize(canvas, phys_w, phys_h, scale as f32, &scene, &self.font);
 
-        wl_surface.damage_buffer(0, 0, width as i32, height as i32);
+        // damage_buffer expresa la región dañada en coordenadas de buffer
+        // físico, no lógico.
+        wl_surface.damage_buffer(0, 0, phys_w as i32, phys_h as i32);
 
         if let Err(err) = buffer.attach_to(&wl_surface) {
             log::error!("buffer attach failed: {err:?}");
@@ -227,10 +239,24 @@ impl CompositorHandler for AppState {
     fn scale_factor_changed(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_factor: i32,
+        qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        new_factor: i32,
     ) {
+        if self.layer.wl_surface() != surface {
+            return;
+        }
+        if self.scale == new_factor || new_factor < 1 {
+            return;
+        }
+
+        log::info!("HiDPI scale changed: {} -> {new_factor}", self.scale);
+        self.scale = new_factor;
+        surface.set_buffer_scale(new_factor);
+
+        if self.configured {
+            self.request_redraw(qh);
+        }
     }
 
     fn transform_changed(

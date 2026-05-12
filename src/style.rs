@@ -38,6 +38,8 @@ pub mod card {
     pub const WIDTH: i32 = 200;
     pub const HEIGHT: i32 = 284;
 
+    pub const THUMB_DECODE_SCALE: u32 = 2;
+
     pub const INACTIVE_WIDTH: i32 = 176;
     pub const INACTIVE_HEIGHT: i32 = 250;
 

@@ -1,68 +1,33 @@
-//! MVU (Model-View-Update) core.
-//!
-//! - [`Model`] holds the entire application state.
-//! - [`Msg`] enumerates every event the system can react to.
-//! - [`Cmd`] enumerates every side effect [`update`] can request.
-//!
-//! [`update`] is `(&mut Model, Msg) -> Vec<Cmd>`: mutates state and returns
-//! a list of effects. Wayland glue in `app.rs` is the only place that
-//! translates handler callbacks into [`Msg`] and actually executes [`Cmd`].
-//! The view side is `render::build_scene`, also pure.
-//!
-//! This is intentionally pragmatic rather than purist Elm: `update` takes
-//! `&mut Model` for zero-clone performance. Tests still benefit because
-//! everything below `app.rs` is reachable without Wayland.
-
+use crate::picker::Picker;
 use std::path::PathBuf;
 
-use crate::picker::Picker;
-
-/// Every event the system can react to. Wayland handlers, the [`Cmd`]
-/// interpreter (for completion of side effects), and tests are the only
-/// producers of `Msg`.
 #[derive(Debug, Clone)]
 pub enum Msg {
-    // Carousel navigation.
     SelectPrev,
     SelectNext,
-    SelectIndex(usize),
 
-    // Pointer hit-testing.
     HoverAt { x: f64, y: f64 },
     ClearHover,
+    PointerPressedAt { x: f64, y: f64 },
 
-    // Intentional actions.
     Apply,
     Quit,
 
-    // Wayland surface lifecycle.
     Configured { width: u32, height: u32 },
     ScaleChanged(i32),
 
-    // Completion of side effects.
     WallpaperApplied(PathBuf),
     WallpaperFailed { path: PathBuf, error: String },
 }
 
-/// Every side effect [`update`] can request. The interpreter in `app.rs`
-/// is responsible for executing these against the world (Wayland, the
-/// applier, the OS). Effects that produce results feed them back as new
-/// [`Msg`]s.
 #[derive(Debug)]
 pub enum Cmd {
-    /// Request a frame from the compositor and redraw on it.
     Redraw,
-    /// Spawn the apply-wallpaper process for the given path. Sync today;
-    /// could become async without touching `Model` / `update`.
     ApplyWallpaper(PathBuf),
-    /// Propagate a new buffer scale to the Wayland surface.
     SetBufferScale(i32),
-    /// Tear down the event loop.
     Exit,
 }
 
-/// Full application state. Composes [`Picker`] (carousel domain) with
-/// Wayland-visible bits.
 pub struct Model {
     pub picker: Picker,
     pub scale: i32,
@@ -83,15 +48,25 @@ impl Model {
     }
 }
 
-/// Heart of MVU: take an event, mutate the model, return any side effects.
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
     match msg {
         Msg::SelectPrev => redraw_if(model.picker.select_prev()),
         Msg::SelectNext => redraw_if(model.picker.select_next()),
-        Msg::SelectIndex(idx) => redraw_if(model.picker.select_index(idx)),
 
         Msg::HoverAt { x, y } => redraw_if(model.picker.hover_at(x, y)),
         Msg::ClearHover => redraw_if(model.picker.clear_hover()),
+
+        Msg::PointerPressedAt { x, y } => {
+            let Some(idx) = model.picker.wallpaper_at(x, y) else {
+                return vec![];
+            };
+            let selection_changed = model.picker.select_index(idx);
+            let mut cmds = vec![Cmd::ApplyWallpaper(model.picker.current().path.clone())];
+            if selection_changed {
+                cmds.push(Cmd::Redraw);
+            }
+            cmds
+        }
 
         Msg::Apply => vec![Cmd::ApplyWallpaper(model.picker.current().path.clone())],
 
@@ -133,7 +108,6 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
 
         Msg::WallpaperFailed { path, error } => {
             log::error!("no se pudo aplicar {}: {error}", path.display());
-            // No salimos: el usuario puede intentar otro wallpaper.
             vec![]
         }
     }
@@ -190,7 +164,6 @@ mod tests {
     fn full_navigate_and_apply_sequence() {
         let mut m = make_model(3);
 
-        // ArrowRight, ArrowRight, Enter.
         let _ = update(&mut m, Msg::SelectNext);
         let _ = update(&mut m, Msg::SelectNext);
         let cmds = update(&mut m, Msg::Apply);
@@ -203,7 +176,6 @@ mod tests {
             other => panic!("esperaba [Cmd::ApplyWallpaper], got {other:?}"),
         }
 
-        // Side effect completion fires Exit.
         let path = PathBuf::from("/tmp/w2.png");
         let cmds = update(&mut m, Msg::WallpaperApplied(path));
         assert!(matches!(cmds.as_slice(), [Cmd::Exit]));
@@ -270,7 +242,6 @@ mod tests {
     fn configure_redraws_only_when_something_changes() {
         let mut m = make_model(3);
 
-        // First configure transitions configured=true.
         let cmds = update(
             &mut m,
             Msg::Configured {
@@ -280,7 +251,6 @@ mod tests {
         );
         assert!(has_redraw(&cmds));
 
-        // Same size again, already configured: no redraw.
         let cmds = update(
             &mut m,
             Msg::Configured {
@@ -290,7 +260,6 @@ mod tests {
         );
         assert!(cmds.is_empty());
 
-        // Different size: redraw.
         let cmds = update(
             &mut m,
             Msg::Configured {
@@ -309,16 +278,45 @@ mod tests {
     }
 
     #[test]
-    fn click_via_select_index_then_apply() {
-        // Lo que hace pointer_frame en Press: SelectIndex(idx) + Apply.
+    fn click_via_pointer_pressed_at() {
         let mut m = make_model(5);
-        let _ = update(&mut m, Msg::SelectIndex(3));
-        let cmds = update(&mut m, Msg::Apply);
-        match cmds.as_slice() {
-            [Cmd::ApplyWallpaper(path)] => {
-                assert_eq!(path.file_name().unwrap(), "w3.png");
+        let cmds = update(&mut m, Msg::PointerPressedAt { x: 100.0, y: 100.0 });
+        assert!(cmds.is_empty(), "sin layout no hay nada que hittear");
+
+        let _layout = m.picker.recompute_layout(1280, 560);
+        let (hit_x, hit_y) = (1280.0 / 2.0, 560.0 / 2.0);
+        assert_eq!(m.picker.wallpaper_at(hit_x, hit_y), Some(0));
+
+        let cmds = update(&mut m, Msg::PointerPressedAt { x: hit_x, y: hit_y });
+        assert!(matches!(cmds.as_slice(), [Cmd::ApplyWallpaper(_)]));
+    }
+
+    #[test]
+    fn click_on_different_card_changes_selection_and_redraws() {
+        let mut m = make_model(5);
+        let _ = m.picker.recompute_layout(1280, 560);
+
+        let mut hit: Option<(f64, f64, usize)> = None;
+        for x_logical in (0..1280).step_by(20) {
+            for y_logical in (0..560).step_by(20) {
+                if let Some(idx) = m.picker.wallpaper_at(x_logical as f64, y_logical as f64)
+                    && idx != 0
+                {
+                    hit = Some((x_logical as f64, y_logical as f64, idx));
+                    break;
+                }
             }
-            other => panic!("got {other:?}"),
+            if hit.is_some() {
+                break;
+            }
         }
+        let (x, y, idx) = hit.expect("debería haber una card no seleccionada visible");
+
+        let cmds = update(&mut m, Msg::PointerPressedAt { x, y });
+        assert_eq!(m.picker.selected(), idx);
+
+        let has_apply = cmds.iter().any(|c| matches!(c, Cmd::ApplyWallpaper(_)));
+        let has_redraw = cmds.iter().any(|c| matches!(c, Cmd::Redraw));
+        assert!(has_apply && has_redraw);
     }
 }

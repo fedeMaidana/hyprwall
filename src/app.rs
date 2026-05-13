@@ -169,8 +169,10 @@ impl AppState {
         let mut pending: Vec<Msg> = vec![msg];
 
         while let Some(msg) = pending.pop() {
+            log::trace!("msg: {msg:?}");
             let cmds = update(&mut self.model, msg);
             for cmd in cmds {
+                log::trace!("cmd: {cmd:?}");
                 if let Some(followup) = self.execute(qh, cmd) {
                     pending.push(followup);
                 }
@@ -518,10 +520,7 @@ impl PointerHandler for AppState {
                     self.dispatch(qh, Msg::ClearHover);
                 }
                 PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
-                    if let Some(idx) = self.model.picker.wallpaper_at(x, y) {
-                        self.dispatch(qh, Msg::SelectIndex(idx));
-                        self.dispatch(qh, Msg::Apply);
-                    }
+                    self.dispatch(qh, Msg::PointerPressedAt { x, y });
                 }
                 _ => {}
             }
@@ -551,8 +550,6 @@ delegate_pointer!(AppState);
 delegate_layer!(AppState);
 delegate_registry!(AppState);
 
-/// Pure translation from a Wayland key event to a `Msg`. Lives outside the
-/// impl so it's unit-testable.
 fn key_event_to_msg(event: &KeyEvent) -> Option<Msg> {
     match event.keysym {
         Keysym::Escape => return Some(Msg::Quit),

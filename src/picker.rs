@@ -126,7 +126,7 @@ impl Picker {
         }
     }
 
-    pub fn wallpaper_at(&self, x: f64, y: f64) -> Option<usize> {
+    pub(crate) fn wallpaper_at(&self, x: f64, y: f64) -> Option<usize> {
         self.last_layout
             .cards
             .iter()

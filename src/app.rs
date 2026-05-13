@@ -30,12 +30,23 @@ use wayland_client::{
 
 use crate::{
     font::load_ui_font,
+    model::{Cmd, Model, Msg, update},
     picker::Picker,
     render::{build_scene, rasterize},
     style,
-    wallpaper::scan_wallpapers,
+    wallpaper::{apply_wallpaper, scan_wallpapers},
 };
 
+/// Wayland adapter and Cmd interpreter.
+///
+/// Holds all the Wayland-specific resources (compositor, layer surface, SHM
+/// pool, input devices) plus the [`Model`] and pre-loaded font. Every
+/// interesting decision happens in [`update`]; this struct's only jobs are:
+///
+/// 1. Translate Wayland handler callbacks into [`Msg`]s and feed them to
+///    [`update`] via [`Self::dispatch`].
+/// 2. Interpret the resulting [`Cmd`]s against the world (paint a frame,
+///    set buffer scale, exec swww/hyprpaper).
 pub struct AppState {
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -46,22 +57,20 @@ pub struct AppState {
     pool: SlotPool,
     layer: LayerSurface,
 
-    width: u32,
-    height: u32,
-    /// HiDPI buffer scale factor. 1 = standard, 2 = retina, etc.
-    /// Updated when the surface enters an output via
-    /// `CompositorHandler::scale_factor_changed`.
-    scale: i32,
-    configured: bool,
-    should_close: bool,
-    needs_redraw: bool,
     redraw_scheduled: bool,
+    /// True once we've successfully attached the first buffer to the
+    /// surface. Until this flips, `Cmd::Redraw` must paint synchronously:
+    /// wlr-layer-shell compositors won't map the surface (or fire `frame`
+    /// callbacks) until they see a buffer attached, so scheduling a frame
+    /// callback from a buffer-less commit deadlocks the first paint.
+    has_rendered: bool,
+    should_close: bool,
 
     keyboard: Option<wl_keyboard::WlKeyboard>,
     keyboard_focus: bool,
     pointer: Option<wl_pointer::WlPointer>,
 
-    picker: Picker,
+    model: Model,
     font: Font,
 }
 
@@ -81,6 +90,11 @@ impl AppState {
         log::info!("loaded {} wallpapers", wallpapers.len());
 
         let picker = Picker::with_current_wallpaper(wallpapers);
+        let model = Model::new(
+            picker,
+            style::surface::WIDTH_HINT,
+            style::surface::HEIGHT_HINT,
+        );
         let font = load_ui_font()?;
 
         let conn = Connection::connect_to_env().context("no se pudo conectar a Wayland")?;
@@ -101,9 +115,6 @@ impl AppState {
         layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
         layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         layer.set_exclusive_zone(-1);
-
-        // 0, 0 + anchors en todos los lados = el compositor decide el tamaño,
-        // normalmente pantalla completa.
         layer.set_size(0, 0);
         layer.commit();
 
@@ -123,23 +134,19 @@ impl AppState {
             pool,
             layer,
 
-            width: style::surface::WIDTH_HINT,
-            height: style::surface::HEIGHT_HINT,
-            scale: 1,
-            configured: false,
-            should_close: false,
-            needs_redraw: false,
             redraw_scheduled: false,
+            has_rendered: false,
+            should_close: false,
 
             keyboard: None,
             keyboard_focus: false,
             pointer: None,
 
-            picker,
+            model,
             font,
         };
 
-        while !app.configured {
+        while !app.model.configured {
             event_queue
                 .blocking_dispatch(&mut app)
                 .context("dispatch esperando configure")?;
@@ -154,13 +161,66 @@ impl AppState {
         Ok(())
     }
 
-    fn request_redraw(&mut self, qh: &QueueHandle<Self>) {
-        self.needs_redraw = true;
+    /// The single funnel for state changes. Every Wayland handler converts
+    /// its callback into a [`Msg`] and routes it through here. Multiple
+    /// `Msg`s can be dispatched in sequence to drain Cmd chains (e.g.
+    /// `ApplyWallpaper` → `WallpaperApplied` → `Exit`).
+    fn dispatch(&mut self, qh: &QueueHandle<Self>, msg: Msg) {
+        let mut pending: Vec<Msg> = vec![msg];
 
+        while let Some(msg) = pending.pop() {
+            let cmds = update(&mut self.model, msg);
+            for cmd in cmds {
+                if let Some(followup) = self.execute(qh, cmd) {
+                    pending.push(followup);
+                }
+            }
+        }
+    }
+
+    /// Interpret a single [`Cmd`] against the world. Returns an optional
+    /// follow-up [`Msg`] (e.g. completion of `ApplyWallpaper`).
+    fn execute(&mut self, qh: &QueueHandle<Self>, cmd: Cmd) -> Option<Msg> {
+        match cmd {
+            Cmd::Redraw => {
+                // First frame must be synchronous: the compositor needs a
+                // buffer attached before it'll map the layer surface or
+                // emit frame callbacks. Subsequent redraws schedule via
+                // the frame callback to coalesce with the refresh rate.
+                if self.has_rendered {
+                    self.request_redraw(qh);
+                } else {
+                    self.render_now();
+                }
+                None
+            }
+            Cmd::SetBufferScale(scale) => {
+                self.layer.wl_surface().set_buffer_scale(scale);
+                None
+            }
+            Cmd::ApplyWallpaper(path) => {
+                // Sync today. If this ever becomes async, run it on a thread
+                // and let the thread post WallpaperApplied/Failed via the
+                // event queue; the rest of MVU doesn't need to change.
+                Some(match apply_wallpaper(&path) {
+                    Ok(()) => Msg::WallpaperApplied(path),
+                    Err(err) => Msg::WallpaperFailed {
+                        path,
+                        error: format!("{err:#}"),
+                    },
+                })
+            }
+            Cmd::Exit => {
+                self.should_close = true;
+                None
+            }
+        }
+    }
+
+    fn request_redraw(&mut self, qh: &QueueHandle<Self>) {
         if self.redraw_scheduled {
             return;
         }
-
         self.redraw_scheduled = true;
 
         let wl_surface = self.layer.wl_surface().clone();
@@ -169,27 +229,27 @@ impl AppState {
     }
 
     fn render_now(&mut self) {
-        // Tamaño lógico (lo que reporta el compositor en configure).
-        let logical_w = self.width.max(1);
-        let logical_h = self.height.max(1);
+        let logical_w = self.model.logical_width.max(1);
+        let logical_h = self.model.logical_height.max(1);
 
-        // Tamaño físico del buffer SHM. El compositor escala el buffer al
-        // viewport del output respetando este factor; pintar al tamaño físico
-        // evita la borrosidad de que el compositor escale un buffer 1×.
-        let scale = self.scale.max(1) as u32;
+        let scale = self.model.scale.max(1) as u32;
         let phys_w = logical_w * scale;
         let phys_h = logical_h * scale;
         let stride = phys_w as i32 * 4;
 
-        let layout = self.picker.recompute_layout(logical_w, logical_h).clone();
+        let layout = self
+            .model
+            .picker
+            .recompute_layout(logical_w, logical_h)
+            .clone();
 
         let scene = build_scene(
             logical_w,
             logical_h,
             &layout,
-            self.picker.wallpapers(),
-            self.picker.selected(),
-            self.picker.hovered(),
+            self.model.picker.wallpapers(),
+            self.model.picker.selected(),
+            self.model.picker.hovered(),
         );
 
         let wl_surface = self.layer.wl_surface().clone();
@@ -205,11 +265,8 @@ impl AppState {
         };
 
         canvas.fill(0);
-
         rasterize(canvas, phys_w, phys_h, scale as f32, &scene, &self.font);
 
-        // damage_buffer expresa la región dañada en coordenadas de buffer
-        // físico, no lógico.
         wl_surface.damage_buffer(0, 0, phys_w as i32, phys_h as i32);
 
         if let Err(err) = buffer.attach_to(&wl_surface) {
@@ -218,20 +275,7 @@ impl AppState {
         }
 
         self.layer.commit();
-    }
-
-    fn apply_selected(&mut self) {
-        let current_path = self.picker.current().path.clone();
-
-        match self.picker.apply_current() {
-            Ok(()) => {
-                log::info!("wallpaper aplicado: {}", current_path.display());
-                self.should_close = true;
-            }
-            Err(err) => {
-                log::error!("no se pudo aplicar {}: {err:?}", current_path.display());
-            }
-        }
+        self.has_rendered = true;
     }
 }
 
@@ -246,17 +290,7 @@ impl CompositorHandler for AppState {
         if self.layer.wl_surface() != surface {
             return;
         }
-        if self.scale == new_factor || new_factor < 1 {
-            return;
-        }
-
-        log::info!("HiDPI scale changed: {} -> {new_factor}", self.scale);
-        self.scale = new_factor;
-        surface.set_buffer_scale(new_factor);
-
-        if self.configured {
-            self.request_redraw(qh);
-        }
+        self.dispatch(qh, Msg::ScaleChanged(new_factor));
     }
 
     fn transform_changed(
@@ -276,12 +310,6 @@ impl CompositorHandler for AppState {
         _time: u32,
     ) {
         self.redraw_scheduled = false;
-
-        if !self.needs_redraw {
-            return;
-        }
-
-        self.needs_redraw = false;
         self.render_now();
     }
 
@@ -308,30 +336,9 @@ impl OutputHandler for AppState {
     fn output_state(&mut self) -> &mut OutputState {
         &mut self.output_state
     }
-
-    fn new_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
-    ) {
-    }
-
-    fn update_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
-    ) {
-    }
-
-    fn output_destroyed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
-    ) {
-    }
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 }
 
 impl LayerShellHandler for AppState {
@@ -342,28 +349,24 @@ impl LayerShellHandler for AppState {
     fn configure(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         _layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
         let (w, h) = configure.new_size;
-        self.width = if w == 0 {
+        let width = if w == 0 {
             style::surface::WIDTH_HINT
         } else {
             w
         };
-        self.height = if h == 0 {
+        let height = if h == 0 {
             style::surface::HEIGHT_HINT
         } else {
             h
         };
 
-        self.configured = true;
-
-        self.needs_redraw = false;
-        self.redraw_scheduled = false;
-        self.render_now();
+        self.dispatch(qh, Msg::Configured { width, height });
     }
 }
 
@@ -371,7 +374,6 @@ impl SeatHandler for AppState {
     fn seat_state(&mut self) -> &mut SeatState {
         &mut self.seat_state
     }
-
     fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 
     fn new_capability(
@@ -387,7 +389,6 @@ impl SeatHandler for AppState {
                 Err(err) => log::warn!("no se pudo crear keyboard: {err:?}"),
             }
         }
-
         if capability == Capability::Pointer && self.pointer.is_none() {
             match self.seat_state.get_pointer(qh, &seat) {
                 Ok(pointer) => self.pointer = Some(pointer),
@@ -408,7 +409,6 @@ impl SeatHandler for AppState {
                 keyboard.release();
             }
         }
-
         if capability == Capability::Pointer {
             if let Some(pointer) = self.pointer.take() {
                 pointer.release();
@@ -428,7 +428,7 @@ impl KeyboardHandler for AppState {
         surface: &wl_surface::WlSurface,
         _: u32,
         _: &[u32],
-        _keysyms: &[Keysym],
+        _: &[Keysym],
     ) {
         if self.layer.wl_surface() == surface {
             self.keyboard_focus = true;
@@ -456,50 +456,8 @@ impl KeyboardHandler for AppState {
         _: u32,
         event: KeyEvent,
     ) {
-        let mut changed = false;
-
-        match event.keysym {
-            Keysym::Escape => {
-                self.should_close = true;
-                return;
-            }
-            Keysym::Return => {
-                self.apply_selected();
-                return;
-            }
-            Keysym::Left => {
-                changed = self.picker.select_prev();
-            }
-            Keysym::Right => {
-                changed = self.picker.select_next();
-            }
-            _ => {}
-        }
-
-        if !changed {
-            if let Some(text) = event.utf8.as_deref() {
-                match text.to_lowercase().as_str() {
-                    "q" => {
-                        self.should_close = true;
-                        return;
-                    }
-                    "h" | "a" => {
-                        changed = self.picker.select_prev();
-                    }
-                    "l" | "d" => {
-                        changed = self.picker.select_next();
-                    }
-                    " " => {
-                        self.apply_selected();
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if changed {
-            self.request_redraw(qh);
+        if let Some(msg) = key_event_to_msg(&event) {
+            self.dispatch(qh, msg);
         }
     }
 
@@ -545,8 +503,6 @@ impl PointerHandler for AppState {
         _pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
-        let mut needs_redraw = false;
-
         for event in events {
             if &event.surface != self.layer.wl_surface() {
                 continue;
@@ -556,27 +512,19 @@ impl PointerHandler for AppState {
 
             match event.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
-                    if self.picker.hover_at(x, y) {
-                        needs_redraw = true;
-                    }
+                    self.dispatch(qh, Msg::HoverAt { x, y });
                 }
                 PointerEventKind::Leave { .. } => {
-                    if self.picker.clear_hover() {
-                        needs_redraw = true;
-                    }
+                    self.dispatch(qh, Msg::ClearHover);
                 }
                 PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
-                    if let Some(index) = self.picker.wallpaper_at(x, y) {
-                        self.picker.select_index(index);
-                        self.apply_selected();
+                    if let Some(idx) = self.model.picker.wallpaper_at(x, y) {
+                        self.dispatch(qh, Msg::SelectIndex(idx));
+                        self.dispatch(qh, Msg::Apply);
                     }
                 }
                 _ => {}
             }
-        }
-
-        if needs_redraw {
-            self.request_redraw(qh);
         }
     }
 }
@@ -591,7 +539,6 @@ impl ProvidesRegistryState for AppState {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
     }
-
     registry_handlers![OutputState, SeatState];
 }
 
@@ -603,3 +550,24 @@ delegate_keyboard!(AppState);
 delegate_pointer!(AppState);
 delegate_layer!(AppState);
 delegate_registry!(AppState);
+
+/// Pure translation from a Wayland key event to a `Msg`. Lives outside the
+/// impl so it's unit-testable.
+fn key_event_to_msg(event: &KeyEvent) -> Option<Msg> {
+    match event.keysym {
+        Keysym::Escape => return Some(Msg::Quit),
+        Keysym::Return => return Some(Msg::Apply),
+        Keysym::Left => return Some(Msg::SelectPrev),
+        Keysym::Right => return Some(Msg::SelectNext),
+        _ => {}
+    }
+
+    let text = event.utf8.as_deref()?;
+    match text.to_lowercase().as_str() {
+        "q" => Some(Msg::Quit),
+        " " => Some(Msg::Apply),
+        "h" | "a" => Some(Msg::SelectPrev),
+        "l" | "d" => Some(Msg::SelectNext),
+        _ => None,
+    }
+}

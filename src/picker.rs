@@ -1,9 +1,8 @@
-use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 use crate::{
     layout::{self, Layout},
-    wallpaper::{Wallpaper, apply_wallpaper, current_wallpaper_path},
+    wallpaper::{Wallpaper, current_wallpaper_path},
 };
 
 /// Pure domain state of the wallpaper carousel: which wallpapers we have,
@@ -132,12 +131,6 @@ impl Picker {
             .cards
             .iter()
             .find_map(|(idx, rect)| rect.contains(x, y).then_some(*idx))
-    }
-
-    /// Applies the currently selected wallpaper through awww / swww /
-    /// hyprpaper.
-    pub fn apply_current(&self) -> Result<()> {
-        apply_wallpaper(&self.current().path)
     }
 }
 

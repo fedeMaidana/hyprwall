@@ -1,31 +1,24 @@
+mod input;
+mod lifecycle;
+
 use anyhow::{Context, Result, bail};
 use fontdue::Font;
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
-    delegate_registry, delegate_seat, delegate_shm,
-    output::{OutputHandler, OutputState},
-    registry::{ProvidesRegistryState, RegistryState},
-    registry_handlers,
-    seat::{
-        Capability, SeatHandler, SeatState,
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
-        pointer::{BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler},
-    },
+    compositor::CompositorState,
+    output::OutputState,
+    registry::RegistryState,
+    seat::SeatState,
     shell::{
         WaylandSurface,
-        wlr_layer::{
-            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
-            LayerSurfaceConfigure,
-        },
+        wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface},
     },
-    shm::{Shm, ShmHandler, slot::SlotPool},
+    shm::{Shm, slot::SlotPool},
 };
 use std::path::PathBuf;
 use wayland_client::{
     Connection, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_keyboard, wl_pointer, wl_shm},
 };
 
 use crate::{
@@ -37,40 +30,25 @@ use crate::{
     wallpaper::{apply_wallpaper, scan_wallpapers},
 };
 
-/// Wayland adapter and Cmd interpreter.
-///
-/// Holds all the Wayland-specific resources (compositor, layer surface, SHM
-/// pool, input devices) plus the [`Model`] and pre-loaded font. Every
-/// interesting decision happens in [`update`]; this struct's only jobs are:
-///
-/// 1. Translate Wayland handler callbacks into [`Msg`]s and feed them to
-///    [`update`] via [`Self::dispatch`].
-/// 2. Interpret the resulting [`Cmd`]s against the world (paint a frame,
-///    set buffer scale, exec swww/hyprpaper).
 pub struct AppState {
-    registry_state: RegistryState,
-    seat_state: SeatState,
-    output_state: OutputState,
+    pub(super) registry_state: RegistryState,
+    pub(super) seat_state: SeatState,
+    pub(super) output_state: OutputState,
     _compositor: CompositorState,
     _layer_shell: LayerShell,
-    shm: Shm,
+    pub(super) shm: Shm,
     pool: SlotPool,
-    layer: LayerSurface,
+    pub(super) layer: LayerSurface,
 
-    redraw_scheduled: bool,
-    /// True once we've successfully attached the first buffer to the
-    /// surface. Until this flips, `Cmd::Redraw` must paint synchronously:
-    /// wlr-layer-shell compositors won't map the surface (or fire `frame`
-    /// callbacks) until they see a buffer attached, so scheduling a frame
-    /// callback from a buffer-less commit deadlocks the first paint.
+    pub(super) redraw_scheduled: bool,
     has_rendered: bool,
-    should_close: bool,
+    pub(super) should_close: bool,
 
-    keyboard: Option<wl_keyboard::WlKeyboard>,
-    keyboard_focus: bool,
-    pointer: Option<wl_pointer::WlPointer>,
+    pub(super) keyboard: Option<wl_keyboard::WlKeyboard>,
+    pub(super) keyboard_focus: bool,
+    pub(super) pointer: Option<wl_pointer::WlPointer>,
 
-    model: Model,
+    pub(super) model: Model,
     font: Font,
 }
 
@@ -161,11 +139,7 @@ impl AppState {
         Ok(())
     }
 
-    /// The single funnel for state changes. Every Wayland handler converts
-    /// its callback into a [`Msg`] and routes it through here. Multiple
-    /// `Msg`s can be dispatched in sequence to drain Cmd chains (e.g.
-    /// `ApplyWallpaper` → `WallpaperApplied` → `Exit`).
-    fn dispatch(&mut self, qh: &QueueHandle<Self>, msg: Msg) {
+    pub(super) fn dispatch(&mut self, qh: &QueueHandle<Self>, msg: Msg) {
         let mut pending: Vec<Msg> = vec![msg];
 
         while let Some(msg) = pending.pop() {
@@ -180,15 +154,9 @@ impl AppState {
         }
     }
 
-    /// Interpret a single [`Cmd`] against the world. Returns an optional
-    /// follow-up [`Msg`] (e.g. completion of `ApplyWallpaper`).
     fn execute(&mut self, qh: &QueueHandle<Self>, cmd: Cmd) -> Option<Msg> {
         match cmd {
             Cmd::Redraw => {
-                // First frame must be synchronous: the compositor needs a
-                // buffer attached before it'll map the layer surface or
-                // emit frame callbacks. Subsequent redraws schedule via
-                // the frame callback to coalesce with the refresh rate.
                 if self.has_rendered {
                     self.request_redraw(qh);
                 } else {
@@ -200,18 +168,13 @@ impl AppState {
                 self.layer.wl_surface().set_buffer_scale(scale);
                 None
             }
-            Cmd::ApplyWallpaper(path) => {
-                // Sync today. If this ever becomes async, run it on a thread
-                // and let the thread post WallpaperApplied/Failed via the
-                // event queue; the rest of MVU doesn't need to change.
-                Some(match apply_wallpaper(&path) {
-                    Ok(()) => Msg::WallpaperApplied(path),
-                    Err(err) => Msg::WallpaperFailed {
-                        path,
-                        error: format!("{err:#}"),
-                    },
-                })
-            }
+            Cmd::ApplyWallpaper(path) => Some(match apply_wallpaper(&path) {
+                Ok(()) => Msg::WallpaperApplied(path),
+                Err(err) => Msg::WallpaperFailed {
+                    path,
+                    error: format!("{err:#}"),
+                },
+            }),
             Cmd::Exit => {
                 self.should_close = true;
                 None
@@ -230,7 +193,7 @@ impl AppState {
         self.layer.commit();
     }
 
-    fn render_now(&mut self) {
+    pub(super) fn render_now(&mut self) {
         let logical_w = self.model.logical_width.max(1);
         let logical_h = self.model.logical_height.max(1);
 
@@ -278,293 +241,5 @@ impl AppState {
 
         self.layer.commit();
         self.has_rendered = true;
-    }
-}
-
-impl CompositorHandler for AppState {
-    fn scale_factor_changed(
-        &mut self,
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        new_factor: i32,
-    ) {
-        if self.layer.wl_surface() != surface {
-            return;
-        }
-        self.dispatch(qh, Msg::ScaleChanged(new_factor));
-    }
-
-    fn transform_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_transform: wl_output::Transform,
-    ) {
-    }
-
-    fn frame(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _time: u32,
-    ) {
-        self.redraw_scheduled = false;
-        self.render_now();
-    }
-
-    fn surface_enter(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
-    ) {
-    }
-
-    fn surface_leave(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
-    ) {
-    }
-}
-
-impl OutputHandler for AppState {
-    fn output_state(&mut self) -> &mut OutputState {
-        &mut self.output_state
-    }
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-}
-
-impl LayerShellHandler for AppState {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
-        self.should_close = true;
-    }
-
-    fn configure(
-        &mut self,
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
-        configure: LayerSurfaceConfigure,
-        _serial: u32,
-    ) {
-        let (w, h) = configure.new_size;
-        let width = if w == 0 {
-            style::surface::WIDTH_HINT
-        } else {
-            w
-        };
-        let height = if h == 0 {
-            style::surface::HEIGHT_HINT
-        } else {
-            h
-        };
-
-        self.dispatch(qh, Msg::Configured { width, height });
-    }
-}
-
-impl SeatHandler for AppState {
-    fn seat_state(&mut self) -> &mut SeatState {
-        &mut self.seat_state
-    }
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
-
-    fn new_capability(
-        &mut self,
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        seat: wl_seat::WlSeat,
-        capability: Capability,
-    ) {
-        if capability == Capability::Keyboard && self.keyboard.is_none() {
-            match self.seat_state.get_keyboard(qh, &seat, None) {
-                Ok(keyboard) => self.keyboard = Some(keyboard),
-                Err(err) => log::warn!("no se pudo crear keyboard: {err:?}"),
-            }
-        }
-        if capability == Capability::Pointer && self.pointer.is_none() {
-            match self.seat_state.get_pointer(qh, &seat) {
-                Ok(pointer) => self.pointer = Some(pointer),
-                Err(err) => log::warn!("no se pudo crear pointer: {err:?}"),
-            }
-        }
-    }
-
-    fn remove_capability(
-        &mut self,
-        _conn: &Connection,
-        _: &QueueHandle<Self>,
-        _: wl_seat::WlSeat,
-        capability: Capability,
-    ) {
-        if capability == Capability::Keyboard {
-            if let Some(keyboard) = self.keyboard.take() {
-                keyboard.release();
-            }
-        }
-        if capability == Capability::Pointer {
-            if let Some(pointer) = self.pointer.take() {
-                pointer.release();
-            }
-        }
-    }
-
-    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
-}
-
-impl KeyboardHandler for AppState {
-    fn enter(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        surface: &wl_surface::WlSurface,
-        _: u32,
-        _: &[u32],
-        _: &[Keysym],
-    ) {
-        if self.layer.wl_surface() == surface {
-            self.keyboard_focus = true;
-        }
-    }
-
-    fn leave(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        surface: &wl_surface::WlSurface,
-        _: u32,
-    ) {
-        if self.layer.wl_surface() == surface {
-            self.keyboard_focus = false;
-        }
-    }
-
-    fn press_key(
-        &mut self,
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: u32,
-        event: KeyEvent,
-    ) {
-        if let Some(msg) = key_event_to_msg(&event) {
-            self.dispatch(qh, msg);
-        }
-    }
-
-    fn repeat_key(
-        &mut self,
-        conn: &Connection,
-        qh: &QueueHandle<Self>,
-        keyboard: &wl_keyboard::WlKeyboard,
-        serial: u32,
-        event: KeyEvent,
-    ) {
-        self.press_key(conn, qh, keyboard, serial, event);
-    }
-
-    fn release_key(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: u32,
-        _: KeyEvent,
-    ) {
-    }
-
-    fn update_modifiers(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _serial: u32,
-        _modifiers: Modifiers,
-        _raw_modifiers: RawModifiers,
-        _layout: u32,
-    ) {
-    }
-}
-
-impl PointerHandler for AppState {
-    fn pointer_frame(
-        &mut self,
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        _pointer: &wl_pointer::WlPointer,
-        events: &[PointerEvent],
-    ) {
-        for event in events {
-            if &event.surface != self.layer.wl_surface() {
-                continue;
-            }
-
-            let (x, y) = event.position;
-
-            match event.kind {
-                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
-                    self.dispatch(qh, Msg::HoverAt { x, y });
-                }
-                PointerEventKind::Leave { .. } => {
-                    self.dispatch(qh, Msg::ClearHover);
-                }
-                PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
-                    self.dispatch(qh, Msg::PointerPressedAt { x, y });
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-impl ShmHandler for AppState {
-    fn shm_state(&mut self) -> &mut Shm {
-        &mut self.shm
-    }
-}
-
-impl ProvidesRegistryState for AppState {
-    fn registry(&mut self) -> &mut RegistryState {
-        &mut self.registry_state
-    }
-    registry_handlers![OutputState, SeatState];
-}
-
-delegate_compositor!(AppState);
-delegate_output!(AppState);
-delegate_shm!(AppState);
-delegate_seat!(AppState);
-delegate_keyboard!(AppState);
-delegate_pointer!(AppState);
-delegate_layer!(AppState);
-delegate_registry!(AppState);
-
-fn key_event_to_msg(event: &KeyEvent) -> Option<Msg> {
-    match event.keysym {
-        Keysym::Escape => return Some(Msg::Quit),
-        Keysym::Return => return Some(Msg::Apply),
-        Keysym::Left => return Some(Msg::SelectPrev),
-        Keysym::Right => return Some(Msg::SelectNext),
-        _ => {}
-    }
-
-    let text = event.utf8.as_deref()?;
-    match text.to_lowercase().as_str() {
-        "q" => Some(Msg::Quit),
-        " " => Some(Msg::Apply),
-        "h" | "a" => Some(Msg::SelectPrev),
-        "l" | "d" => Some(Msg::SelectNext),
-        _ => None,
     }
 }

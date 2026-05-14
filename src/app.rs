@@ -1,5 +1,6 @@
 mod input;
 mod lifecycle;
+mod renderer;
 
 use anyhow::{Context, Result, bail};
 use fontdue::Font;
@@ -18,14 +19,13 @@ use std::path::PathBuf;
 use wayland_client::{
     Connection, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_pointer, wl_shm},
+    protocol::{wl_keyboard, wl_pointer},
 };
 
 use crate::{
     font::load_ui_font,
     model::{Cmd, Model, Msg, update},
     picker::Picker,
-    render::{build_scene, rasterize},
     style,
     wallpaper::{apply_wallpaper, scan_wallpapers},
 };
@@ -111,15 +111,12 @@ impl AppState {
             shm,
             pool,
             layer,
-
             redraw_scheduled: false,
             has_rendered: false,
             should_close: false,
-
             keyboard: None,
             keyboard_focus: false,
             pointer: None,
-
             model,
             font,
         };
@@ -180,66 +177,5 @@ impl AppState {
                 None
             }
         }
-    }
-
-    fn request_redraw(&mut self, qh: &QueueHandle<Self>) {
-        if self.redraw_scheduled {
-            return;
-        }
-        self.redraw_scheduled = true;
-
-        let wl_surface = self.layer.wl_surface().clone();
-        wl_surface.frame(qh, wl_surface.clone());
-        self.layer.commit();
-    }
-
-    pub(super) fn render_now(&mut self) {
-        let logical_w = self.model.logical_width.max(1);
-        let logical_h = self.model.logical_height.max(1);
-
-        let scale = self.model.scale.max(1) as u32;
-        let phys_w = logical_w * scale;
-        let phys_h = logical_h * scale;
-        let stride = phys_w as i32 * 4;
-
-        let layout = self
-            .model
-            .picker
-            .recompute_layout(logical_w, logical_h)
-            .clone();
-
-        let scene = build_scene(
-            logical_w,
-            logical_h,
-            &layout,
-            self.model.picker.wallpapers(),
-            self.model.picker.selected(),
-            self.model.picker.hovered(),
-        );
-
-        let wl_surface = self.layer.wl_surface().clone();
-
-        let Ok((buffer, canvas)) = self.pool.create_buffer(
-            phys_w as i32,
-            phys_h as i32,
-            stride,
-            wl_shm::Format::Argb8888,
-        ) else {
-            log::error!("no se pudo crear buffer SHM");
-            return;
-        };
-
-        canvas.fill(0);
-        rasterize(canvas, phys_w, phys_h, scale as f32, &scene, &self.font);
-
-        wl_surface.damage_buffer(0, 0, phys_w as i32, phys_h as i32);
-
-        if let Err(err) = buffer.attach_to(&wl_surface) {
-            log::error!("buffer attach failed: {err:?}");
-            return;
-        }
-
-        self.layer.commit();
-        self.has_rendered = true;
     }
 }

@@ -122,8 +122,6 @@ impl PointerHandler for AppState {
     }
 }
 
-/// Pure translation from a Wayland key event to a [`Msg`]. `None` means
-/// the key is ignored. Lives here so it's testable without Wayland.
 pub(super) fn key_event_to_msg(event: &KeyEvent) -> Option<Msg> {
     match event.keysym {
         Keysym::Escape => return Some(Msg::Quit),

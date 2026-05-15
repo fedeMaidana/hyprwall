@@ -32,6 +32,47 @@ pub(super) fn remember_current_wallpaper(path: &Path) {
             cache_file.display()
         );
     }
+
+    remember_current_wallpaper_symlink(&path);
+}
+
+fn remember_current_wallpaper_symlink(path: &Path) {
+    let Some(symlink_path) = current_wallpaper_image_symlink() else {
+        return;
+    };
+
+    if symlink_path.exists() || symlink_path.is_symlink() {
+        if let Err(err) = fs::remove_file(&symlink_path) {
+            log::warn!(
+                "no se pudo reemplazar symlink de wallpaper actual {}: {err:?}",
+                symlink_path.display()
+            );
+            return;
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        if let Err(err) = symlink(path, &symlink_path) {
+            log::warn!(
+                "no se pudo crear symlink de wallpaper actual {} -> {}: {err:?}",
+                symlink_path.display(),
+                path.display()
+            );
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        if let Err(err) = fs::copy(path, &symlink_path) {
+            log::warn!(
+                "no se pudo copiar wallpaper actual a {}: {err:?}",
+                symlink_path.display()
+            );
+        }
+    }
 }
 
 fn current_from_hyprpaper() -> Option<PathBuf> {
@@ -103,14 +144,17 @@ fn clean_path(path: &str) -> PathBuf {
 }
 
 fn current_wallpaper_cache_file() -> Option<PathBuf> {
+    hyprwall_cache_dir().map(|dir| dir.join("current_wallpaper"))
+}
+
+fn current_wallpaper_image_symlink() -> Option<PathBuf> {
+    hyprwall_cache_dir().map(|dir| dir.join("current_wallpaper_image"))
+}
+
+fn hyprwall_cache_dir() -> Option<PathBuf> {
     if let Some(cache_home) = env::var_os("XDG_CACHE_HOME") {
-        return Some(PathBuf::from(cache_home).join("hyprwall/current_wallpaper"));
+        return Some(PathBuf::from(cache_home).join("hyprwall"));
     }
 
-    env::var_os("HOME").map(|home| {
-        PathBuf::from(home)
-            .join(".cache")
-            .join("hyprwall")
-            .join("current_wallpaper")
-    })
+    env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache").join("hyprwall"))
 }

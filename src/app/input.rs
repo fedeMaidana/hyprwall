@@ -94,7 +94,7 @@ impl KeyboardHandler for AppState {
 impl PointerHandler for AppState {
     fn pointer_frame(
         &mut self,
-        _conn: &Connection,
+        conn: &Connection,
         qh: &QueueHandle<Self>,
         _pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
@@ -107,8 +107,13 @@ impl PointerHandler for AppState {
             let (x, y) = event.position;
 
             match event.kind {
-                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                PointerEventKind::Enter { .. } => {
                     self.dispatch(qh, Msg::HoverAt { x, y });
+                    self.update_cursor_icon(conn, true);
+                }
+                PointerEventKind::Motion { .. } => {
+                    self.dispatch(qh, Msg::HoverAt { x, y });
+                    self.update_cursor_icon(conn, false);
                 }
                 PointerEventKind::Leave { .. } => {
                     self.dispatch(qh, Msg::ClearHover);

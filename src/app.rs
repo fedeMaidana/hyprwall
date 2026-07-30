@@ -9,6 +9,7 @@ use smithay_client_toolkit::{
     output::OutputState,
     registry::RegistryState,
     seat::SeatState,
+    seat::pointer::{CursorIcon, ThemedPointer},
     shell::{
         WaylandSurface,
         wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface},
@@ -19,7 +20,7 @@ use std::path::PathBuf;
 use wayland_client::{
     Connection, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_pointer},
+    protocol::wl_keyboard,
 };
 
 use crate::{
@@ -35,7 +36,7 @@ pub struct AppState {
     pub(super) registry_state: RegistryState,
     pub(super) seat_state: SeatState,
     pub(super) output_state: OutputState,
-    _compositor: CompositorState,
+    pub(super) compositor: CompositorState,
     _layer_shell: LayerShell,
     pub(super) shm: Shm,
     pool: SlotPool,
@@ -47,7 +48,8 @@ pub struct AppState {
 
     pub(super) keyboard: Option<wl_keyboard::WlKeyboard>,
     pub(super) keyboard_focus: bool,
-    pub(super) pointer: Option<wl_pointer::WlPointer>,
+    pub(super) themed_pointer: Option<ThemedPointer>,
+    pub(super) cursor_icon: CursorIcon,
 
     pub(super) model: Model,
     pub(super) colors: DynamicColors,
@@ -108,7 +110,7 @@ impl AppState {
             registry_state: RegistryState::new(&globals),
             seat_state: SeatState::new(&globals, &qh),
             output_state: OutputState::new(&globals, &qh),
-            _compositor: compositor,
+            compositor,
             _layer_shell: layer_shell,
             shm,
             pool,
@@ -118,7 +120,8 @@ impl AppState {
             should_close: false,
             keyboard: None,
             keyboard_focus: false,
-            pointer: None,
+            themed_pointer: None,
+            cursor_icon: CursorIcon::Default,
             model,
             colors: hyprcolor::load().unwrap_or(DynamicColors::FALLBACK),
             font,
@@ -137,6 +140,30 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    /// Switches to a pointing-hand cursor while hovering a wallpaper card.
+    pub(super) fn update_cursor_icon(&mut self, conn: &Connection, force: bool) {
+        let icon = if self.model.picker.hovered().is_some() {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Default
+        };
+
+        if !force && icon == self.cursor_icon {
+            return;
+        }
+
+        let Some(pointer) = self.themed_pointer.as_mut() else {
+            return;
+        };
+
+        if let Err(error) = pointer.set_cursor(conn, icon) {
+            log::warn!("no se pudo actualizar el cursor: {error}");
+            return;
+        }
+
+        self.cursor_icon = icon;
     }
 
     pub(super) fn dispatch(&mut self, qh: &QueueHandle<Self>, msg: Msg) {

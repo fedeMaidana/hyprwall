@@ -11,6 +11,7 @@ use smithay_client_toolkit::{
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
+    seat::pointer::ThemeSpec,
     seat::{Capability, SeatHandler, SeatState},
     shell::{
         WaylandSurface,
@@ -135,10 +136,15 @@ impl SeatHandler for AppState {
                 Err(err) => log::warn!("no se pudo crear keyboard: {err:?}"),
             }
         }
-        if capability == Capability::Pointer && self.pointer.is_none() {
-            match self.seat_state.get_pointer(qh, &seat) {
-                Ok(pointer) => self.pointer = Some(pointer),
-                Err(err) => log::warn!("no se pudo crear pointer: {err:?}"),
+        if capability == Capability::Pointer && self.themed_pointer.is_none() {
+            let surface = self.compositor.create_surface(qh);
+
+            match self
+                .seat_state
+                .get_pointer_with_theme(qh, &seat, self.shm.wl_shm(), surface, ThemeSpec::default())
+            {
+                Ok(pointer) => self.themed_pointer = Some(pointer),
+                Err(err) => log::warn!("no se pudo crear themed pointer: {err:?}"),
             }
         }
     }
@@ -156,9 +162,9 @@ impl SeatHandler for AppState {
             keyboard.release();
         }
         if capability == Capability::Pointer
-            && let Some(pointer) = self.pointer.take()
+            && let Some(pointer) = self.themed_pointer.take()
         {
-            pointer.release();
+            pointer.pointer().release();
         }
     }
 

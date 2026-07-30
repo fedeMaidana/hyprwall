@@ -48,18 +48,26 @@ fn count_round_rects(scene: &Scene<'_>) -> usize {
 }
 
 #[test]
-fn first_command_is_the_panel() {
+fn scrim_covers_everything_then_panel_follows() {
     let wallpapers = three_wallpapers();
     let layout = fake_layout(3);
     let scene = build_scene(1280, 560, &layout, &wallpapers, 0, None);
 
     match scene.commands.first() {
+        Some(DrawCmd::RoundRect { rect, color, .. }) => {
+            assert_eq!((rect.x, rect.y, rect.w, rect.h), (0, 0, 1280, 560));
+            assert_eq!(color.a, Color::SCRIM.a);
+        }
+        other => panic!("expected fullscreen scrim first, got {:?}", other.is_some()),
+    }
+
+    match scene.commands.get(1) {
         Some(DrawCmd::RoundRect { color, .. }) => {
             assert_eq!(color.r, Color::PANEL.r);
             assert_eq!(color.g, Color::PANEL.g);
             assert_eq!(color.b, Color::PANEL.b);
         }
-        other => panic!("expected panel RoundRect first, got {:?}", other.is_some()),
+        other => panic!("expected panel RoundRect second, got {:?}", other.is_some()),
     }
 }
 
@@ -106,10 +114,11 @@ fn hovering_the_selected_card_is_a_noop() {
 }
 
 #[test]
-fn empty_layout_only_emits_panel() {
+fn empty_layout_only_emits_scrim_and_panel() {
     let wallpapers = three_wallpapers();
     let layout = Layout::empty();
     let scene = build_scene(1280, 560, &layout, &wallpapers, 0, None);
-    assert_eq!(scene.commands.len(), 1);
+    assert_eq!(scene.commands.len(), 2);
     assert!(matches!(scene.commands[0], DrawCmd::RoundRect { .. }));
+    assert!(matches!(scene.commands[1], DrawCmd::RoundRect { .. }));
 }

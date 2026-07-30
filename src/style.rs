@@ -7,6 +7,9 @@ pub struct Color {
 }
 
 impl Color {
+    /// Full-screen backdrop: keeps every pixel non-transparent so the
+    /// compositor blur (layerrule) covers the whole output, and dims it.
+    pub const SCRIM: Self = Self::rgba(0, 0, 0, 110);
     pub const PANEL: Self = Self::rgba(28, 32, 40, 105);
     pub const CARD_BG: Self = Self::rgba(16, 18, 21, 255);
     pub const CARD_DIM: Self = Self::rgba(0, 0, 0, 68);

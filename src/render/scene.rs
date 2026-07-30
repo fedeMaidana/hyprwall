@@ -59,6 +59,20 @@ pub fn build_scene<'a>(
 ) -> Scene<'a> {
     let mut scene = Scene::new();
 
+    // Fullscreen scrim first: gives every pixel alpha so the compositor
+    // blur reaches the entire screen, not just the panel.
+    scene.push(DrawCmd::RoundRect {
+        rect: Rect {
+            x: 0,
+            y: 0,
+            w: app_width as i32,
+            h: app_height as i32,
+        },
+        radius: 0,
+        corners: Corners::ALL,
+        color: Color::SCRIM,
+    });
+
     scene.push(DrawCmd::RoundRect {
         rect: carousel_panel_rect(app_width, app_height, layout),
         radius: style::panel::RADIUS,

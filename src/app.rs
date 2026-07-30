@@ -24,10 +24,10 @@ use wayland_client::{
 
 use crate::{
     font::load_ui_font,
-    hyprcolor,
+    hyprcolor::{self, DynamicColors},
     model::{Cmd, Model, Msg, update},
     picker::Picker,
-    style::{self, Color},
+    style,
     wallpaper::{apply_wallpaper, scan_wallpapers},
 };
 
@@ -50,7 +50,7 @@ pub struct AppState {
     pub(super) pointer: Option<wl_pointer::WlPointer>,
 
     pub(super) model: Model,
-    pub(super) panel_color: Color,
+    pub(super) colors: DynamicColors,
     font: Font,
 }
 
@@ -120,7 +120,7 @@ impl AppState {
             keyboard_focus: false,
             pointer: None,
             model,
-            panel_color: hyprcolor::panel_color().unwrap_or(Color::PANEL),
+            colors: hyprcolor::load().unwrap_or(DynamicColors::FALLBACK),
             font,
         };
 

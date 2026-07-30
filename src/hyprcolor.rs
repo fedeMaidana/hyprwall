@@ -7,18 +7,46 @@ use std::{env, fs, path::PathBuf};
 
 use crate::style::Color;
 
-/// Panel hue taken from the wallpaper palette, keeping the panel's own
-/// translucency. `None` when the palette is missing or malformed.
-pub fn panel_color() -> Option<Color> {
-    let content = fs::read_to_string(colors_json_path()?).ok()?;
-    let hex = extract_hex(&content, "background")?;
-    let (r, g, b) = parse_hex(&hex)?;
+/// Colors derived from the wallpaper palette, used across the picker UI.
+#[derive(Clone, Copy, Debug)]
+pub struct DynamicColors {
+    pub panel: Color,
+    pub accent: Color,
+}
 
-    Some(Color {
-        r,
-        g,
-        b,
-        a: Color::PANEL.a,
+impl DynamicColors {
+    pub const FALLBACK: Self = Self {
+        panel: Color::PANEL,
+        accent: Color::ACCENT_FALLBACK,
+    };
+}
+
+/// Reads the palette, keeping the panel's own translucency. `None` when
+/// the palette is missing or malformed.
+pub fn load() -> Option<DynamicColors> {
+    let content = fs::read_to_string(colors_json_path()?).ok()?;
+
+    let (r, g, b) = parse_hex(&extract_hex(&content, "background")?)?;
+
+    // A palette without accent still tints the panel.
+    let accent = extract_hex(&content, "accent")
+        .and_then(|hex| parse_hex(&hex))
+        .map(|(ar, ag, ab)| Color {
+            r: ar,
+            g: ag,
+            b: ab,
+            a: 255,
+        })
+        .unwrap_or(Color::ACCENT_FALLBACK);
+
+    Some(DynamicColors {
+        panel: Color {
+            r,
+            g,
+            b,
+            a: Color::PANEL.a,
+        },
+        accent,
     })
 }
 

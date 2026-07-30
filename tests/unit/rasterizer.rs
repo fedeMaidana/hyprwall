@@ -20,14 +20,18 @@ fn render_dump_png() {
     let phys_w = (logical_w as f32 * scale).round() as u32;
     let phys_h = (logical_h as f32 * scale).round() as u32;
     let layout_result = layout::compute(logical_w, logical_h, wallpapers.len(), 0);
+    let selection = crate::render::scene::Selection {
+        selected: 0,
+        hovered: Some(2),
+        applied: None,
+    };
     let scene = build_scene(
         logical_w,
         logical_h,
         &layout_result,
         &wallpapers,
-        0,
-        Some(2),
-        crate::style::Color::PANEL,
+        selection,
+        crate::hyprcolor::DynamicColors::FALLBACK,
     );
 
     let mut canvas = vec![0u8; (phys_w * phys_h * 4) as usize];

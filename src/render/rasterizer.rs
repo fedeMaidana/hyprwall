@@ -6,7 +6,7 @@ use tiny_skia::Pixmap;
 use crate::{
     geometry::Rect,
     render::{
-        draw::{draw_thumbnail, fill_round_rect, fill_vertical_gradient},
+        draw::{draw_thumbnail, fill_round_rect, fill_vertical_gradient, stroke_round_rect},
         scene::{DrawCmd, Scene},
         text::draw_text_centered_in_rect,
     },
@@ -33,6 +33,13 @@ pub fn rasterize(
                 corners,
                 color,
             } => fill_round_rect(&mut pixmap, rect, radius, corners, color),
+            DrawCmd::StrokeRoundRect {
+                rect,
+                radius,
+                corners,
+                width,
+                color,
+            } => stroke_round_rect(&mut pixmap, rect, radius, corners, width, color),
             DrawCmd::VerticalGradient {
                 rect,
                 radius,
@@ -82,6 +89,19 @@ fn scale_cmd<'a>(cmd: &DrawCmd<'a>, scale: f32) -> DrawCmd<'a> {
             rect: scale_rect(rect, scale),
             radius: scale_len(radius, scale),
             corners,
+            color,
+        },
+        DrawCmd::StrokeRoundRect {
+            rect,
+            radius,
+            corners,
+            width,
+            color,
+        } => DrawCmd::StrokeRoundRect {
+            rect: scale_rect(rect, scale),
+            radius: scale_len(radius, scale),
+            corners,
+            width: width * scale,
             color,
         },
         DrawCmd::VerticalGradient {

@@ -1,9 +1,19 @@
 use crate::{
     geometry::{Corners, Rect},
+    hyprcolor::DynamicColors,
     layout::Layout,
     style::{self, Color},
     wallpaper::{Thumbnail, Wallpaper},
 };
+
+/// Which cards are highlighted: keyboard selection, pointer hover and the
+/// wallpaper currently applied on the desktop.
+#[derive(Clone, Copy, Debug)]
+pub struct Selection {
+    pub selected: usize,
+    pub hovered: Option<usize>,
+    pub applied: Option<usize>,
+}
 
 #[derive(Clone)]
 pub enum DrawCmd<'a> {
@@ -11,6 +21,13 @@ pub enum DrawCmd<'a> {
         rect: Rect,
         radius: i32,
         corners: Corners,
+        color: Color,
+    },
+    StrokeRoundRect {
+        rect: Rect,
+        radius: i32,
+        corners: Corners,
+        width: f32,
         color: Color,
     },
     VerticalGradient {
@@ -54,9 +71,8 @@ pub fn build_scene<'a>(
     app_height: u32,
     layout: &Layout,
     wallpapers: &'a [Wallpaper],
-    selected_index: usize,
-    hovered_index: Option<usize>,
-    panel_color: Color,
+    selection: Selection,
+    colors: DynamicColors,
 ) -> Scene<'a> {
     let mut scene = Scene::new();
 
@@ -74,52 +90,64 @@ pub fn build_scene<'a>(
         color: Color::SCRIM,
     });
 
+    let panel = carousel_panel_rect(app_width, app_height, layout);
+
     scene.push(DrawCmd::RoundRect {
-        rect: carousel_panel_rect(app_width, app_height, layout),
+        rect: panel,
         radius: style::panel::RADIUS,
         corners: Corners::ALL,
-        color: panel_color,
+        color: colors.panel,
     });
 
     for (idx, image_rect) in &layout.cards {
-        let selected = *idx == selected_index;
-        let hovered = hovered_index == Some(*idx);
+        let selected = *idx == selection.selected;
+        let hovered = selection.hovered == Some(*idx);
         let wallpaper = &wallpapers[*idx];
         let visible_card_rect = card_rect_with_label_area(*image_rect);
 
         if hovered && !selected {
-            scene.push(DrawCmd::RoundRect {
-                rect: outset_rect(visible_card_rect, 4),
-                radius: style::card::RADIUS + 4,
+            scene.push(DrawCmd::StrokeRoundRect {
+                rect: outset_rect(visible_card_rect, style::selection::HOVER_OUTSET),
+                radius: style::card::RADIUS + style::selection::HOVER_OUTSET,
                 corners: Corners::ALL,
-                color: Color::HOVER,
+                width: style::selection::HOVER_WIDTH,
+                color: colors.accent.with_alpha(style::selection::HOVER_ALPHA),
             });
         }
 
         if selected {
-            push_selected_card(&mut scene, *image_rect, wallpaper);
+            push_selected_card(&mut scene, *image_rect, wallpaper, colors.accent);
         } else {
-            let distance = wallpaper_distance(*idx, selected_index, wallpapers.len());
+            let distance = wallpaper_distance(*idx, selection.selected, wallpapers.len());
             push_inactive_card(&mut scene, visible_card_rect, wallpaper, distance);
+
+            if hovered {
+                push_card_label(&mut scene, visible_card_rect, wallpaper);
+            }
+        }
+
+        if selection.applied == Some(*idx) {
+            push_applied_badge(&mut scene, visible_card_rect, colors.accent);
         }
     }
+
+    push_keyboard_hints(&mut scene, panel);
 
     scene
 }
 
-fn push_selected_card<'a>(scene: &mut Scene<'a>, image_rect: Rect, wallpaper: &'a Wallpaper) {
+fn push_selected_card<'a>(
+    scene: &mut Scene<'a>,
+    image_rect: Rect,
+    wallpaper: &'a Wallpaper,
+    accent: Color,
+) {
     let card_rect = card_rect_with_label_area(image_rect);
     scene.push(DrawCmd::RoundRect {
-        rect: outset_rect(card_rect, 10),
-        radius: style::card::RADIUS + 10,
+        rect: outset_rect(card_rect, style::selection::GLOW_OUTSET),
+        radius: style::card::RADIUS + style::selection::GLOW_OUTSET,
         corners: Corners::ALL,
-        color: Color::ACTIVE_GLOW,
-    });
-    scene.push(DrawCmd::RoundRect {
-        rect: outset_rect(card_rect, 1),
-        radius: style::card::RADIUS + 1,
-        corners: Corners::ALL,
-        color: Color::ACTIVE_BORDER,
+        color: accent.with_alpha(style::selection::GLOW_ALPHA),
     });
     scene.push(DrawCmd::Thumbnail {
         rect: card_rect,
@@ -127,10 +155,24 @@ fn push_selected_card<'a>(scene: &mut Scene<'a>, image_rect: Rect, wallpaper: &'
         corners: Corners::ALL,
         thumb: &wallpaper.thumb,
     });
+    scene.push(DrawCmd::StrokeRoundRect {
+        rect: outset_rect(card_rect, style::selection::RING_OUTSET),
+        radius: style::card::RADIUS + style::selection::RING_OUTSET,
+        corners: Corners::ALL,
+        width: style::selection::RING_WIDTH,
+        color: accent.with_alpha(style::selection::RING_ALPHA),
+    });
+    push_card_label(scene, card_rect, wallpaper);
+}
+
+/// Bottom gradient plus the wallpaper name, over any card rect.
+fn push_card_label<'a>(scene: &mut Scene<'a>, card_rect: Rect, wallpaper: &'a Wallpaper) {
+    let image_bottom = card_rect.y + card_rect.h - style::label::SELECTED_STRIP_HEIGHT;
+
     let overlay_rect = Rect {
-        x: image_rect.x,
-        y: image_rect.y + image_rect.h - style::label::GRADIENT_LIFT,
-        w: image_rect.w,
+        x: card_rect.x,
+        y: image_bottom - style::label::GRADIENT_LIFT,
+        w: card_rect.w,
         h: style::label::SELECTED_STRIP_HEIGHT + style::label::GRADIENT_LIFT,
     };
     scene.push(DrawCmd::VerticalGradient {
@@ -151,9 +193,9 @@ fn push_selected_card<'a>(scene: &mut Scene<'a>, image_rect: Rect, wallpaper: &'
         top_alpha: 0,
     });
     let label_rect = Rect {
-        x: image_rect.x - 12,
-        y: image_rect.y + image_rect.h + style::label::TOP_GAP,
-        w: image_rect.w + 24,
+        x: card_rect.x - 12,
+        y: image_bottom + style::label::TOP_GAP,
+        w: card_rect.w + 24,
         h: style::label::SELECTED_STRIP_HEIGHT - style::label::TOP_GAP,
     };
     let shadow_rect = Rect {
@@ -198,6 +240,65 @@ fn push_inactive_card<'a>(
         radius: style::card::RADIUS,
         corners: Corners::ALL,
         color: inactive_dim_color(distance),
+    });
+    // Glass hairline: separates the card from the panel and dark thumbs.
+    scene.push(DrawCmd::StrokeRoundRect {
+        rect: card_rect,
+        radius: style::card::RADIUS,
+        corners: Corners::ALL,
+        width: 1.0,
+        color: Color::CARD_HAIRLINE,
+    });
+}
+
+/// Accent dot marking the wallpaper that is currently applied.
+fn push_applied_badge(scene: &mut Scene<'_>, card_rect: Rect, accent: Color) {
+    let outer = style::selection::BADGE_OUTER;
+    let inner = style::selection::BADGE_INNER;
+    let margin = style::selection::BADGE_MARGIN;
+
+    let outer_rect = Rect {
+        x: card_rect.x + card_rect.w - outer - margin,
+        y: card_rect.y + margin,
+        w: outer,
+        h: outer,
+    };
+    let inset = (outer - inner) / 2;
+    let inner_rect = Rect {
+        x: outer_rect.x + inset,
+        y: outer_rect.y + inset,
+        w: inner,
+        h: inner,
+    };
+
+    scene.push(DrawCmd::RoundRect {
+        rect: outer_rect,
+        radius: outer / 2,
+        corners: Corners::ALL,
+        color: Color::CARD_BG,
+    });
+    scene.push(DrawCmd::RoundRect {
+        rect: inner_rect,
+        radius: inner / 2,
+        corners: Corners::ALL,
+        color: accent,
+    });
+}
+
+/// Muted key guide at the bottom edge of the panel.
+fn push_keyboard_hints(scene: &mut Scene<'_>, panel: Rect) {
+    let hint_rect = Rect {
+        x: panel.x,
+        y: panel.y + panel.h - style::hints::STRIP_HEIGHT,
+        w: panel.w,
+        h: style::hints::STRIP_HEIGHT,
+    };
+
+    scene.push(DrawCmd::Text {
+        rect: hint_rect,
+        text: style::hints::TEXT,
+        font_size: style::hints::FONT_SIZE,
+        color: Color::HINT_TEXT,
     });
 }
 

@@ -9,6 +9,7 @@ pub struct Picker {
     wallpapers: Vec<Wallpaper>,
     selected: usize,
     hovered: Option<usize>,
+    applied: Option<usize>,
     last_layout: Layout,
 }
 
@@ -23,13 +24,16 @@ impl Picker {
             wallpapers,
             selected,
             hovered: None,
+            applied: None,
             last_layout: Layout::empty(),
         }
     }
 
     pub fn with_current_wallpaper(wallpapers: Vec<Wallpaper>) -> Self {
-        let initial = find_initial_selected(&wallpapers);
-        Self::new(wallpapers, initial)
+        let applied = find_current_index(&wallpapers);
+        let mut picker = Self::new(wallpapers, applied.unwrap_or(0));
+        picker.applied = applied;
+        picker
     }
 
     pub fn wallpapers(&self) -> &[Wallpaper] {
@@ -40,6 +44,9 @@ impl Picker {
     }
     pub fn hovered(&self) -> Option<usize> {
         self.hovered
+    }
+    pub fn applied(&self) -> Option<usize> {
+        self.applied
     }
     pub fn current(&self) -> &Wallpaper {
         &self.wallpapers[self.selected]
@@ -111,15 +118,12 @@ impl Picker {
     }
 }
 
-fn find_initial_selected(wallpapers: &[Wallpaper]) -> usize {
-    let Some(current_path) = current_wallpaper_path() else {
-        return 0;
-    };
-    let current_path = normalize_path(&current_path);
+fn find_current_index(wallpapers: &[Wallpaper]) -> Option<usize> {
+    let current_path = normalize_path(&current_wallpaper_path()?);
+
     wallpapers
         .iter()
         .position(|w| normalize_path(&w.path) == current_path)
-        .unwrap_or(0)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {

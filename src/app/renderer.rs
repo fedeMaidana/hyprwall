@@ -6,7 +6,7 @@
 use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_client::{QueueHandle, protocol::wl_shm};
 
-use crate::render::{build_scene, rasterize};
+use crate::render::{Selection, build_scene, rasterize};
 
 use super::AppState;
 
@@ -41,14 +41,19 @@ impl AppState {
             .recompute_layout(logical_w, logical_h)
             .clone();
 
+        let selection = Selection {
+            selected: self.model.picker.selected(),
+            hovered: self.model.picker.hovered(),
+            applied: self.model.picker.applied(),
+        };
+
         let scene = build_scene(
             logical_w,
             logical_h,
             &layout,
             self.model.picker.wallpapers(),
-            self.model.picker.selected(),
-            self.model.picker.hovered(),
-            self.panel_color,
+            selection,
+            self.colors,
         );
 
         let wl_surface = self.layer.wl_surface().clone();

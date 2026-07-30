@@ -1,6 +1,6 @@
 use tiny_skia::{
     FillRule, FilterQuality, GradientStop, LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap,
-    PixmapPaint, PixmapRef, Point, SpreadMode, Transform,
+    PixmapPaint, PixmapRef, Point, SpreadMode, Stroke, Transform,
 };
 
 use crate::{
@@ -33,6 +33,30 @@ pub fn fill_round_rect(
         Transform::identity(),
         None,
     );
+}
+
+pub fn stroke_round_rect(
+    pixmap: &mut Pixmap,
+    rect: Rect,
+    radius: i32,
+    corners: Corners,
+    width: f32,
+    color: Color,
+) {
+    let Some(path) = round_rect_path(rect, radius, corners) else {
+        return;
+    };
+
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+    paint.anti_alias = true;
+
+    let stroke = Stroke {
+        width,
+        ..Stroke::default()
+    };
+
+    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
 }
 
 pub fn fill_vertical_gradient(

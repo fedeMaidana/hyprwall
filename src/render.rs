@@ -4,4 +4,4 @@ mod scene;
 mod text;
 
 pub use rasterizer::rasterize;
-pub use scene::build_scene;
+pub use scene::{Selection, build_scene};

@@ -2,6 +2,38 @@ use super::*;
 use crate::wallpaper::Thumbnail;
 use std::path::PathBuf;
 
+fn sel(selected: usize, hovered: Option<usize>) -> Selection {
+    Selection {
+        selected,
+        hovered,
+        applied: None,
+    }
+}
+
+fn build<'a>(
+    layout: &Layout,
+    wallpapers: &'a [Wallpaper],
+    selected: usize,
+    hovered: Option<usize>,
+) -> Scene<'a> {
+    build_scene(
+        1280,
+        560,
+        layout,
+        wallpapers,
+        sel(selected, hovered),
+        DynamicColors::FALLBACK,
+    )
+}
+
+fn count_strokes(scene: &Scene<'_>) -> usize {
+    scene
+        .commands
+        .iter()
+        .filter(|c| matches!(c, DrawCmd::StrokeRoundRect { .. }))
+        .count()
+}
+
 fn fake_wallpaper(label: &str) -> Wallpaper {
     Wallpaper {
         path: PathBuf::from(format!("/tmp/{label}.png")),
@@ -51,7 +83,7 @@ fn count_round_rects(scene: &Scene<'_>) -> usize {
 fn scrim_covers_everything_then_panel_follows() {
     let wallpapers = three_wallpapers();
     let layout = fake_layout(3);
-    let scene = build_scene(1280, 560, &layout, &wallpapers, 0, None, Color::PANEL);
+    let scene = build(&layout, &wallpapers, 0, None);
 
     match scene.commands.first() {
         Some(DrawCmd::RoundRect { rect, color, .. }) => {
@@ -75,7 +107,7 @@ fn scrim_covers_everything_then_panel_follows() {
 fn selected_card_emits_thumbnail_and_label() {
     let wallpapers = three_wallpapers();
     let layout = fake_layout(3);
-    let scene = build_scene(1280, 560, &layout, &wallpapers, 1, None, Color::PANEL);
+    let scene = build(&layout, &wallpapers, 1, None);
 
     let expected_thumb = &wallpapers[1].thumb;
     let has_b_thumb = scene.commands.iter().any(|c| match c {
@@ -93,32 +125,65 @@ fn selected_card_emits_thumbnail_and_label() {
 }
 
 #[test]
-fn hovering_non_selected_adds_one_round_rect() {
+fn hovering_non_selected_adds_ring_and_label() {
     let wallpapers = three_wallpapers();
     let layout = fake_layout(3);
-    let without = build_scene(1280, 560, &layout, &wallpapers, 0, None, Color::PANEL);
-    let with_hover = build_scene(1280, 560, &layout, &wallpapers, 0, Some(2), Color::PANEL);
-    assert_eq!(
-        count_round_rects(&with_hover),
-        count_round_rects(&without) + 1
-    );
+    let without = build(&layout, &wallpapers, 0, None);
+    let with_hover = build(&layout, &wallpapers, 0, Some(2));
+
+    assert_eq!(count_strokes(&with_hover), count_strokes(&without) + 1);
+
+    let hovered_labels = with_hover
+        .commands
+        .iter()
+        .filter(|c| matches!(c, DrawCmd::Text { text, .. } if *text == "c"))
+        .count();
+    assert_eq!(hovered_labels, 2, "esperaba shadow + label del hovereado");
 }
 
 #[test]
 fn hovering_the_selected_card_is_a_noop() {
     let wallpapers = three_wallpapers();
     let layout = fake_layout(3);
-    let without = build_scene(1280, 560, &layout, &wallpapers, 0, None, Color::PANEL);
-    let with_hover = build_scene(1280, 560, &layout, &wallpapers, 0, Some(0), Color::PANEL);
-    assert_eq!(count_round_rects(&with_hover), count_round_rects(&without));
+    let without = build(&layout, &wallpapers, 0, None);
+    let with_hover = build(&layout, &wallpapers, 0, Some(0));
+    assert_eq!(with_hover.commands.len(), without.commands.len());
 }
 
 #[test]
-fn empty_layout_only_emits_scrim_and_panel() {
+fn applied_badge_marks_the_current_wallpaper() {
+    let wallpapers = three_wallpapers();
+    let layout = fake_layout(3);
+
+    let selection = Selection {
+        selected: 0,
+        hovered: None,
+        applied: Some(1),
+    };
+    let with_badge = build_scene(
+        1280,
+        560,
+        &layout,
+        &wallpapers,
+        selection,
+        DynamicColors::FALLBACK,
+    );
+    let without_badge = build(&layout, &wallpapers, 0, None);
+
+    assert_eq!(
+        count_round_rects(&with_badge),
+        count_round_rects(&without_badge) + 2,
+        "el badge agrega dos círculos (fondo + acento)"
+    );
+}
+
+#[test]
+fn empty_layout_emits_scrim_panel_and_hints() {
     let wallpapers = three_wallpapers();
     let layout = Layout::empty();
-    let scene = build_scene(1280, 560, &layout, &wallpapers, 0, None, Color::PANEL);
-    assert_eq!(scene.commands.len(), 2);
+    let scene = build(&layout, &wallpapers, 0, None);
+    assert_eq!(scene.commands.len(), 3);
     assert!(matches!(scene.commands[0], DrawCmd::RoundRect { .. }));
     assert!(matches!(scene.commands[1], DrawCmd::RoundRect { .. }));
+    assert!(matches!(scene.commands[2], DrawCmd::Text { .. }));
 }

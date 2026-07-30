@@ -16,6 +16,7 @@ pub fn apply_wallpaper(path: &Path) -> Result<()> {
         match apply_with_awww(path) {
             Ok(()) => {
                 remember_current_wallpaper(path);
+                notify_hyprcolor();
                 return Ok(());
             }
             Err(err) => errors.push(format!("awww: {err:#}")),
@@ -26,6 +27,7 @@ pub fn apply_wallpaper(path: &Path) -> Result<()> {
         match apply_with_swww(path) {
             Ok(()) => {
                 remember_current_wallpaper(path);
+                notify_hyprcolor();
                 return Ok(());
             }
             Err(err) => errors.push(format!("swww: {err:#}")),
@@ -36,6 +38,7 @@ pub fn apply_wallpaper(path: &Path) -> Result<()> {
         match apply_with_hyprpaper(path) {
             Ok(()) => {
                 remember_current_wallpaper(path);
+                notify_hyprcolor();
                 return Ok(());
             }
             Err(err) => errors.push(format!("hyprpaper: {err:#}")),
@@ -214,6 +217,13 @@ fn run_command(program: &str, args: &[&str]) -> Result<()> {
         stdout.trim(),
         stderr.trim()
     )
+}
+
+/// Wakes the hyprcolor daemon so the palette refresh is instant.
+fn notify_hyprcolor() {
+    let _ = Command::new("pkill")
+        .args(["-USR1", "-x", "hyprcolor"])
+        .status();
 }
 
 fn command_exists(command: &str) -> bool {

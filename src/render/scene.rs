@@ -56,6 +56,7 @@ pub fn build_scene<'a>(
     wallpapers: &'a [Wallpaper],
     selected_index: usize,
     hovered_index: Option<usize>,
+    panel_color: Color,
 ) -> Scene<'a> {
     let mut scene = Scene::new();
 
@@ -77,7 +78,7 @@ pub fn build_scene<'a>(
         rect: carousel_panel_rect(app_width, app_height, layout),
         radius: style::panel::RADIUS,
         corners: Corners::ALL,
-        color: Color::PANEL,
+        color: panel_color,
     });
 
     for (idx, image_rect) in &layout.cards {

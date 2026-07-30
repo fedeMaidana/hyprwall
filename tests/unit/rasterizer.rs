@@ -27,6 +27,7 @@ fn render_dump_png() {
         &wallpapers,
         0,
         Some(2),
+        crate::style::Color::PANEL,
     );
 
     let mut canvas = vec![0u8; (phys_w * phys_h * 4) as usize];

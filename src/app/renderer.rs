@@ -48,6 +48,7 @@ impl AppState {
             self.model.picker.wallpapers(),
             self.model.picker.selected(),
             self.model.picker.hovered(),
+            self.panel_color,
         );
 
         let wl_surface = self.layer.wl_surface().clone();

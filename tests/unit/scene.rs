@@ -51,7 +51,7 @@ fn count_round_rects(scene: &Scene<'_>) -> usize {
 fn scrim_covers_everything_then_panel_follows() {
     let wallpapers = three_wallpapers();
     let layout = fake_layout(3);
-    let scene = build_scene(1280, 560, &layout, &wallpapers, 0, None);
+    let scene = build_scene(1280, 560, &layout, &wallpapers, 0, None, Color::PANEL);
 
     match scene.commands.first() {
         Some(DrawCmd::RoundRect { rect, color, .. }) => {
@@ -75,7 +75,7 @@ fn scrim_covers_everything_then_panel_follows() {
 fn selected_card_emits_thumbnail_and_label() {
     let wallpapers = three_wallpapers();
     let layout = fake_layout(3);
-    let scene = build_scene(1280, 560, &layout, &wallpapers, 1, None);
+    let scene = build_scene(1280, 560, &layout, &wallpapers, 1, None, Color::PANEL);
 
     let expected_thumb = &wallpapers[1].thumb;
     let has_b_thumb = scene.commands.iter().any(|c| match c {
@@ -96,8 +96,8 @@ fn selected_card_emits_thumbnail_and_label() {
 fn hovering_non_selected_adds_one_round_rect() {
     let wallpapers = three_wallpapers();
     let layout = fake_layout(3);
-    let without = build_scene(1280, 560, &layout, &wallpapers, 0, None);
-    let with_hover = build_scene(1280, 560, &layout, &wallpapers, 0, Some(2));
+    let without = build_scene(1280, 560, &layout, &wallpapers, 0, None, Color::PANEL);
+    let with_hover = build_scene(1280, 560, &layout, &wallpapers, 0, Some(2), Color::PANEL);
     assert_eq!(
         count_round_rects(&with_hover),
         count_round_rects(&without) + 1
@@ -108,8 +108,8 @@ fn hovering_non_selected_adds_one_round_rect() {
 fn hovering_the_selected_card_is_a_noop() {
     let wallpapers = three_wallpapers();
     let layout = fake_layout(3);
-    let without = build_scene(1280, 560, &layout, &wallpapers, 0, None);
-    let with_hover = build_scene(1280, 560, &layout, &wallpapers, 0, Some(0));
+    let without = build_scene(1280, 560, &layout, &wallpapers, 0, None, Color::PANEL);
+    let with_hover = build_scene(1280, 560, &layout, &wallpapers, 0, Some(0), Color::PANEL);
     assert_eq!(count_round_rects(&with_hover), count_round_rects(&without));
 }
 
@@ -117,7 +117,7 @@ fn hovering_the_selected_card_is_a_noop() {
 fn empty_layout_only_emits_scrim_and_panel() {
     let wallpapers = three_wallpapers();
     let layout = Layout::empty();
-    let scene = build_scene(1280, 560, &layout, &wallpapers, 0, None);
+    let scene = build_scene(1280, 560, &layout, &wallpapers, 0, None, Color::PANEL);
     assert_eq!(scene.commands.len(), 2);
     assert!(matches!(scene.commands[0], DrawCmd::RoundRect { .. }));
     assert!(matches!(scene.commands[1], DrawCmd::RoundRect { .. }));

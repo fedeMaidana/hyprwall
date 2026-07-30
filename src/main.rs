@@ -4,6 +4,7 @@ mod app;
 mod cli;
 mod font;
 mod geometry;
+mod hyprcolor;
 mod layout;
 mod model;
 mod picker;

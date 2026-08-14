@@ -5,6 +5,9 @@ use std::path::PathBuf;
 pub enum Msg {
     SelectPrev,
     SelectNext,
+    /// Scroll de rueda/touchpad, medido en clicks de rueda (fraccional
+    /// para fuentes continuas como touchpads).
+    ScrollBy { notches: f32 },
     HoverAt { x: f64, y: f64 },
     ClearHover,
     PointerPressedAt { x: f64, y: f64 },
@@ -48,6 +51,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Cmd> {
     match msg {
         Msg::SelectPrev => redraw_if(model.picker.select_prev()),
         Msg::SelectNext => redraw_if(model.picker.select_next()),
+        Msg::ScrollBy { notches } => redraw_if(model.picker.scroll_by(notches)),
         Msg::HoverAt { x, y } => redraw_if(model.picker.hover_at(x, y)),
         Msg::ClearHover => redraw_if(model.picker.clear_hover()),
         Msg::PointerPressedAt { x, y } => {

@@ -1,113 +1,240 @@
 use crate::{geometry::Rect, style};
 
+/// Una card ya posicionada por el layout.
+#[derive(Clone, Copy, Debug)]
+pub struct CardSlot {
+    pub index: usize,
+    pub rect: Rect,
+    /// Offset fraccional (en cards) respecto del centro del carrusel,
+    /// CON signo: negativo = a la izquierda. `offset.abs()` es la
+    /// distancia; el signo orienta el tilt 3D.
+    pub offset: f32,
+    /// 1.0 = sólida; < 1.0 mientras se desvanece contra el borde del panel.
+    pub opacity: f32,
+}
+
 #[derive(Clone)]
 pub struct Layout {
-    pub cards: Vec<(usize, Rect)>,
+    pub cards: Vec<CardSlot>,
+    /// Borde izquierdo del contenido EN REPOSO. El panel se dimensiona con
+    /// esto (y no con las cards visibles) para no "respirar" durante la
+    /// animación de scroll.
+    pub content_left: i32,
+    /// Borde derecho del contenido en reposo.
+    pub content_right: i32,
 }
 
 impl Layout {
     pub fn empty() -> Self {
-        Self { cards: Vec::new() }
+        Self {
+            cards: Vec::new(),
+            content_left: 0,
+            content_right: 0,
+        }
     }
 }
 
-pub fn compute(width: u32, height: u32, wallpaper_count: usize, selected: usize) -> Layout {
+/// Layout continuo del carrusel. `pos` vive en "espacio de índices":
+/// 2.5 significa a mitad de camino entre la card 2 y la 3. Con `pos`
+/// entera el resultado es idéntico al layout discreto original; con `pos`
+/// fraccional cada card interpola entre slots vecinos, lo que produce el
+/// desplazamiento fluido.
+pub fn compute(width: u32, height: u32, wallpaper_count: usize, pos: f32) -> Layout {
     if wallpaper_count == 0 {
         return Layout::empty();
     }
 
     let width = width as i32;
     let height = height as i32;
+    let count = wallpaper_count as f32;
 
-    let selected = selected.min(wallpaper_count - 1);
+    let slots = build_slot_table(width, height, wallpaper_count);
+
+    let content_min_x = style::panel::MIN_SCREEN_MARGIN + style::panel::HORIZONTAL_PADDING;
+    let content_max_x = width - style::panel::MIN_SCREEN_MARGIN - style::panel::HORIZONTAL_PADDING;
+
+    let mut placed: Vec<(f32, CardSlot)> = Vec::new();
+
+    for index in 0..wallpaper_count {
+        // Offset con wrap al rango [-count/2, count/2).
+        let mut u = (index as f32 - pos).rem_euclid(count);
+        if u >= count / 2.0 {
+            u -= count;
+        }
+
+        let Some(rect) = interpolated_slot(&slots, u) else {
+            continue;
+        };
+
+        let opacity = edge_opacity(rect, content_min_x, content_max_x);
+        if opacity <= 0.0 {
+            continue;
+        }
+
+        placed.push((
+            u,
+            CardSlot {
+                index,
+                rect,
+                offset: u,
+                opacity,
+            },
+        ));
+    }
+
+    placed.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    Layout {
+        cards: placed.into_iter().map(|(_, card)| card).collect(),
+        content_left: slots.rest_left,
+        content_right: slots.rest_right,
+    }
+}
+
+/// Geometría de los slots a distancia entera del centro: `right[k]` /
+/// `left[k]` es el slot a k cards del centro (índice 0 = card activa).
+/// Incluye EDGE_EXTRA_SLOTS más allá del último que cabe en el panel: son
+/// los puntos por los que las cards entran y salen deslizándose.
+struct SlotTable {
+    right: Vec<Rect>,
+    left: Vec<Rect>,
+    rest_left: i32,
+    rest_right: i32,
+}
+
+fn build_slot_table(width: i32, height: i32, wallpaper_count: usize) -> SlotTable {
+    let gap = style::card::GAP;
+    let extra = style::scroll::EDGE_EXTRA_SLOTS;
 
     let active_w = style::card::WIDTH;
     let active_h = style::card::HEIGHT;
-    let gap = style::card::GAP;
-
     let active_x = (width - active_w) / 2;
-
     let active_group_h = active_h + style::label::SELECTED_STRIP_HEIGHT;
     let active_y = (height - active_group_h) / 2;
 
-    let active_rect = Rect {
+    let active = Rect {
         x: active_x,
         y: active_y,
         w: active_w,
         h: active_h,
     };
 
-    let mut left_cards = Vec::new();
-    let mut right_cards = Vec::new();
-    let mut placed_indices = vec![selected];
+    let content_min_x = style::panel::MIN_SCREEN_MARGIN + style::panel::HORIZONTAL_PADDING;
+    let content_max_x = width - style::panel::MIN_SCREEN_MARGIN - style::panel::HORIZONTAL_PADDING;
 
-    let mut left_edge = active_x;
+    // En reposo (pos entera) los offsets con wrap caen en
+    // [-count/2, count/2), así que la izquierda recibe la mitad "grande"
+    // cuando el total es par — igual que el layout original.
+    let max_left = wallpaper_count / 2;
+    let max_right = wallpaper_count.saturating_sub(1) / 2;
+
+    let mut right = vec![active];
+    let mut left = vec![active];
+
     let mut right_edge = active_x + active_w;
+    let mut left_edge = active_x;
 
-    let mut distance = 1;
+    // Último k por lado cuyo slot cabe entero dentro del panel.
+    let mut fit_right = 0usize;
+    let mut fit_left = 0usize;
 
-    while placed_indices.len() < wallpaper_count {
-        let (inactive_w, inactive_h) = inactive_card_size(distance);
+    let mut k = 1usize;
+    loop {
+        let (w, h) = inactive_card_size(k);
+        let group_h = h + style::label::SELECTED_STRIP_HEIGHT;
+        let y = (height - group_h) / 2;
 
-        let inactive_group_h = inactive_h + style::label::SELECTED_STRIP_HEIGHT;
-        let inactive_y = (height - inactive_group_h) / 2;
+        let want_right = k <= (fit_right + extra).min(max_right + extra);
+        let want_left = k <= (fit_left + extra).min(max_left + extra);
 
-        let left_x = left_edge - gap - inactive_w;
-        let right_x = right_edge + gap;
-
-        let left_fits = left_x >= 0;
-        let right_fits = right_x + inactive_w <= width;
-
-        if !left_fits && !right_fits {
+        if !want_right && !want_left {
             break;
         }
 
-        let left_index = wrapped_index(selected, wallpaper_count, -(distance as isize));
-        let right_index = wrapped_index(selected, wallpaper_count, distance as isize);
-
-        if left_fits
-            && push_card_once(
-                &mut left_cards,
-                &mut placed_indices,
-                left_index,
-                Rect {
-                    x: left_x,
-                    y: inactive_y,
-                    w: inactive_w,
-                    h: inactive_h,
-                },
-            )
-        {
-            left_edge = left_x;
+        if want_right {
+            let x = right_edge + gap;
+            right.push(Rect { x, y, w, h });
+            right_edge = x + w;
+            if fit_right == k - 1 && x + w <= content_max_x {
+                fit_right = k;
+            }
         }
 
-        if right_fits
-            && push_card_once(
-                &mut right_cards,
-                &mut placed_indices,
-                right_index,
-                Rect {
-                    x: right_x,
-                    y: inactive_y,
-                    w: inactive_w,
-                    h: inactive_h,
-                },
-            )
-        {
-            right_edge = right_x + inactive_w;
+        if want_left {
+            let x = left_edge - gap - w;
+            left.push(Rect { x, y, w, h });
+            left_edge = x;
+            if fit_left == k - 1 && x >= content_min_x {
+                fit_left = k;
+            }
         }
 
-        distance += 1;
+        k += 1;
+        if k > 128 {
+            break;
+        }
     }
 
-    left_cards.reverse();
+    let used_right = fit_right.min(max_right);
+    let used_left = fit_left.min(max_left);
 
-    let mut cards = Vec::with_capacity(left_cards.len() + 1 + right_cards.len());
-    cards.extend(left_cards);
-    cards.push((selected, active_rect));
-    cards.extend(right_cards);
+    let rest_right = {
+        let rect = right[used_right];
+        rect.x + rect.w
+    };
+    let rest_left = left[used_left].x;
 
-    Layout { cards }
+    SlotTable {
+        right,
+        left,
+        rest_left,
+        rest_right,
+    }
+}
+
+/// Rect de una card a distancia fraccional `u`: interpola linealmente
+/// entre los slots enteros vecinos. Con `u` entero devuelve el slot
+/// exacto, así el reposo queda pixel-perfect.
+fn interpolated_slot(slots: &SlotTable, u: f32) -> Option<Rect> {
+    let lo = u.floor();
+    let t = u - lo;
+
+    let a = integer_slot(slots, lo)?;
+    if t <= f32::EPSILON {
+        return Some(a);
+    }
+    let b = integer_slot(slots, lo + 1.0)?;
+
+    Some(Rect {
+        x: lerp_i32(a.x, b.x, t),
+        y: lerp_i32(a.y, b.y, t),
+        w: lerp_i32(a.w, b.w, t),
+        h: lerp_i32(a.h, b.h, t),
+    })
+}
+
+fn integer_slot(slots: &SlotTable, k: f32) -> Option<Rect> {
+    let k = k as i64;
+    if k >= 0 {
+        slots.right.get(k as usize).copied()
+    } else {
+        slots.left.get(k.unsigned_abs() as usize).copied()
+    }
+}
+
+fn lerp_i32(a: i32, b: i32, t: f32) -> i32 {
+    (a as f32 + (b as f32 - a as f32) * t).round() as i32
+}
+
+/// Opacidad según cuánto invade la card el padding del panel: a
+/// FADE_RANGE px de overhang ya es invisible. Como FADE_RANGE es menor
+/// que el padding, ninguna card llega a asomarse fuera del panel.
+fn edge_opacity(rect: Rect, content_min_x: i32, content_max_x: i32) -> f32 {
+    let overhang = (content_min_x - rect.x)
+        .max(rect.x + rect.w - content_max_x)
+        .max(0);
+
+    1.0 - overhang as f32 / style::scroll::FADE_RANGE as f32
 }
 
 fn inactive_card_size(distance: usize) -> (i32, i32) {
@@ -120,27 +247,4 @@ fn inactive_card_size(distance: usize) -> (i32, i32) {
     let height = style::card::INACTIVE_HEIGHT * scale_percent / 100;
 
     (width.max(1), height.max(1))
-}
-
-fn wrapped_index(selected: usize, count: usize, offset: isize) -> usize {
-    let count = count as isize;
-    let selected = selected as isize;
-
-    (selected + offset).rem_euclid(count) as usize
-}
-
-fn push_card_once(
-    cards: &mut Vec<(usize, Rect)>,
-    placed_indices: &mut Vec<usize>,
-    index: usize,
-    rect: Rect,
-) -> bool {
-    if placed_indices.contains(&index) {
-        return false;
-    }
-
-    placed_indices.push(index);
-    cards.push((index, rect));
-
-    true
 }

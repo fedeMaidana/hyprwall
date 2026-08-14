@@ -5,7 +5,7 @@
 
 use smithay_client_toolkit::{
     seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
-    seat::pointer::{BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler},
+    seat::pointer::{AxisScroll, BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler},
     shell::WaylandSurface,
 };
 use wayland_client::{
@@ -13,7 +13,7 @@ use wayland_client::{
     protocol::{wl_keyboard, wl_pointer, wl_surface},
 };
 
-use crate::{app::AppState, model::Msg};
+use crate::{app::AppState, model::Msg, style};
 
 impl KeyboardHandler for AppState {
     fn enter(
@@ -121,9 +121,32 @@ impl PointerHandler for AppState {
                 PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
                     self.dispatch(qh, Msg::PointerPressedAt { x, y });
                 }
+                PointerEventKind::Axis {
+                    horizontal,
+                    vertical,
+                    ..
+                } => {
+                    let notches = axis_notches(&vertical) + axis_notches(&horizontal);
+                    if notches != 0.0 {
+                        self.dispatch(qh, Msg::ScrollBy { notches });
+                    }
+                }
                 _ => {}
             }
         }
+    }
+}
+
+/// Convierte un eje de scroll a "clicks de rueda". Prefiere la señal de
+/// alta resolución (value120), después los pasos discretos y por último
+/// los píxeles absolutos (touchpads y compositores viejos).
+fn axis_notches(axis: &AxisScroll) -> f32 {
+    if axis.value120 != 0 {
+        axis.value120 as f32 / 120.0
+    } else if axis.discrete != 0 {
+        axis.discrete as f32
+    } else {
+        (axis.absolute / style::scroll::WHEEL_UNITS_PER_NOTCH) as f32
     }
 }
 

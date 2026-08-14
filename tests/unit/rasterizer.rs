@@ -19,7 +19,7 @@ fn render_dump_png() {
     let (logical_w, logical_h) = (1280u32, 560u32);
     let phys_w = (logical_w as f32 * scale).round() as u32;
     let phys_h = (logical_h as f32 * scale).round() as u32;
-    let layout_result = layout::compute(logical_w, logical_h, wallpapers.len(), 0);
+    let layout_result = layout::compute(logical_w, logical_h, wallpapers.len(), 0.0);
     let selection = crate::render::scene::Selection {
         selected: 0,
         hovered: Some(2),

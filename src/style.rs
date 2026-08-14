@@ -41,10 +41,40 @@ pub mod surface {
 }
 
 pub mod panel {
-    pub const HEIGHT: i32 = 392;
+    /// Sin la franja de hints adentro (ahora viven debajo del panel), la
+    /// altura deja márgenes parejos alrededor de las cards.
+    pub const HEIGHT: i32 = 380;
     pub const RADIUS: i32 = 30;
     pub const HORIZONTAL_PADDING: i32 = 56;
     pub const MIN_SCREEN_MARGIN: i32 = 56;
+}
+
+pub mod scroll {
+    /// Unidades absolutas de eje Wayland que equivalen a un "click" de rueda
+    /// (fallback para compositores que no mandan pasos discretos).
+    pub const WHEEL_UNITS_PER_NOTCH: f64 = 15.0;
+
+    /// Cuántas cards avanza un click de rueda.
+    pub const WHEEL_CARDS_PER_NOTCH: f32 = 1.0;
+
+    /// Velocidad con la que la posición persigue al objetivo (1/s).
+    /// Más alto = respuesta más seca; más bajo = deslizamiento más largo.
+    pub const SMOOTH_RATE: f32 = 14.0;
+
+    /// Distancia (en cards) bajo la cual la animación se da por asentada.
+    pub const SNAP_EPS: f32 = 0.002;
+
+    /// dt máximo por frame; protege el paso de animación tras una pausa.
+    pub const MAX_FRAME_DT: f32 = 0.05;
+
+    /// Overhang (px) sobre el borde interior del panel al que una card se
+    /// desvanece por completo. Debe ser menor que panel::HORIZONTAL_PADDING
+    /// para que ninguna card llegue a asomarse fuera del panel.
+    pub const FADE_RANGE: i32 = 48;
+
+    /// Slots de geometría extra más allá del último que cabe: los puntos
+    /// por los que las cards entran y salen deslizándose.
+    pub const EDGE_EXTRA_SLOTS: usize = 2;
 }
 
 pub mod card {
@@ -67,6 +97,31 @@ pub mod card {
     pub const RADIUS: i32 = 16;
 }
 
+pub mod parallax {
+    /// Ancho extra (px lógicos por lado) con el que se decodifica cada
+    /// thumbnail. Es el "colchón" de imagen que permite panear dentro de
+    /// la card sin dejar bordes vacíos.
+    pub const BLEED: i32 = 56;
+
+    /// Cuánto del desplazamiento de la card respecto del centro de la
+    /// pantalla se traslada (invertido) a la imagen interior. 18 = 18%.
+    pub const STRENGTH_PERCENT: i32 = 18;
+}
+
+pub mod card3d {
+    /// Ángulo máximo de rotación (grados) de las cards laterales
+    /// alrededor de su eje vertical, mirando hacia el centro.
+    pub const ANGLE_DEG: f32 = 12.0;
+
+    /// Distancia de cámara en anchos de card. Más chico = perspectiva
+    /// más agresiva (el borde cercano se agranda más); más grande = más
+    /// plano. Valores sanos: 2.0 a 5.0.
+    pub const DEPTH_CARDS: f32 = 4.5;
+
+    /// A cuántas cards del centro el efecto llega al máximo.
+    pub const RAMP_CARDS: f32 = 1.0;
+}
+
 pub mod selection {
     /// Ring around the selected card, drawn with the dynamic accent.
     pub const RING_OUTSET: i32 = 2;
@@ -86,9 +141,11 @@ pub mod selection {
 }
 
 pub mod hints {
-    pub const TEXT: &str = "‹ › elegir · Enter aplicar · Esc salir";
+    pub const TEXT: &str = "‹ › / rueda elegir · Enter aplicar · Esc salir";
     pub const FONT_SIZE: f32 = 10.5;
     pub const STRIP_HEIGHT: i32 = 26;
+    /// Separación entre el borde inferior del panel y la franja de hints.
+    pub const PANEL_GAP: i32 = 14;
 }
 
 pub mod label {

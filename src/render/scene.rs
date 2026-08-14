@@ -42,6 +42,12 @@ pub enum DrawCmd<'a> {
         radius: i32,
         corners: Corners,
         thumb: &'a Thumbnail,
+        /// Paneo horizontal (parallax) de la imagen dentro de la card,
+        /// en px lógicos. Positivo = imagen corrida a la derecha.
+        shift_x: i32,
+        /// Opacidad de la card (1.0 = sólida); anima el desvanecimiento
+        /// contra los bordes del panel durante el scroll.
+        opacity: f32,
     },
     Text {
         rect: Rect,
@@ -49,6 +55,22 @@ pub enum DrawCmd<'a> {
         font_size: f32,
         color: Color,
     },
+    /// Abre un grupo con rotación 3D en perspectiva real: los comandos
+    /// siguientes se proyectan como un plano rotado `tilt` (fracción del
+    /// ángulo máximo, con signo) alrededor del eje vertical del pivote,
+    /// hasta el próximo [`DrawCmd::EndTilt`]. El texto no se transforma
+    /// (las etiquetas quedan derechas y legibles).
+    BeginTilt {
+        pivot_x: f32,
+        pivot_y: f32,
+        /// Fracción del ángulo máximo, en [-1, 1]. Positivo = card a la
+        /// derecha del centro (mira hacia adentro).
+        tilt: f32,
+        /// Ancho de referencia de la card (px): fija la distancia de
+        /// cámara en unidades de card.
+        ref_width: f32,
+    },
+    EndTilt,
 }
 
 pub struct Scene<'a> {
@@ -99,11 +121,26 @@ pub fn build_scene<'a>(
         color: colors.panel,
     });
 
-    for (idx, image_rect) in &layout.cards {
-        let selected = *idx == selection.selected;
-        let hovered = selection.hovered == Some(*idx);
-        let wallpaper = &wallpapers[*idx];
-        let visible_card_rect = card_rect_with_label_area(*image_rect);
+    for card in &layout.cards {
+        let idx = card.index;
+        let opacity = card.opacity;
+        let selected = idx == selection.selected;
+        let hovered = selection.hovered == Some(idx);
+        let wallpaper = &wallpapers[idx];
+        let visible_card_rect = card_rect_with_label_area(card.rect);
+
+        // Rotación 3D de las cards laterales, continua durante el scroll
+        // (crece con el offset al centro).
+        let tilt = card_tilt(card.offset);
+        let tilted = tilt.abs() > 0.005;
+        if tilted {
+            scene.push(DrawCmd::BeginTilt {
+                pivot_x: visible_card_rect.x as f32 + visible_card_rect.w as f32 / 2.0,
+                pivot_y: visible_card_rect.y as f32 + visible_card_rect.h as f32 / 2.0,
+                tilt,
+                ref_width: visible_card_rect.w as f32,
+            });
+        }
 
         if hovered && !selected {
             scene.push(DrawCmd::StrokeRoundRect {
@@ -111,23 +148,45 @@ pub fn build_scene<'a>(
                 radius: style::card::RADIUS + style::selection::HOVER_OUTSET,
                 corners: Corners::ALL,
                 width: style::selection::HOVER_WIDTH,
-                color: colors.accent.with_alpha(style::selection::HOVER_ALPHA),
+                color: fade(
+                    colors.accent.with_alpha(style::selection::HOVER_ALPHA),
+                    opacity,
+                ),
             });
         }
 
+        let shift_x = parallax_shift(card.rect, app_width as i32);
+
         if selected {
-            push_selected_card(&mut scene, *image_rect, wallpaper, colors.accent);
+            push_selected_card(
+                &mut scene,
+                card.rect,
+                wallpaper,
+                colors.accent,
+                shift_x,
+                opacity,
+            );
         } else {
-            let distance = wallpaper_distance(*idx, selection.selected, wallpapers.len());
-            push_inactive_card(&mut scene, visible_card_rect, wallpaper, distance);
+            push_inactive_card(
+                &mut scene,
+                visible_card_rect,
+                wallpaper,
+                card.offset.abs(),
+                shift_x,
+                opacity,
+            );
 
             if hovered {
-                push_card_label(&mut scene, visible_card_rect, wallpaper);
+                push_card_label(&mut scene, visible_card_rect, wallpaper, opacity);
             }
         }
 
-        if selection.applied == Some(*idx) {
-            push_applied_badge(&mut scene, visible_card_rect, colors.accent);
+        if selection.applied == Some(idx) {
+            push_applied_badge(&mut scene, visible_card_rect, colors.accent, opacity);
+        }
+
+        if tilted {
+            scene.push(DrawCmd::EndTilt);
         }
     }
 
@@ -141,32 +200,41 @@ fn push_selected_card<'a>(
     image_rect: Rect,
     wallpaper: &'a Wallpaper,
     accent: Color,
+    shift_x: i32,
+    opacity: f32,
 ) {
     let card_rect = card_rect_with_label_area(image_rect);
     scene.push(DrawCmd::RoundRect {
         rect: outset_rect(card_rect, style::selection::GLOW_OUTSET),
         radius: style::card::RADIUS + style::selection::GLOW_OUTSET,
         corners: Corners::ALL,
-        color: accent.with_alpha(style::selection::GLOW_ALPHA),
+        color: fade(accent.with_alpha(style::selection::GLOW_ALPHA), opacity),
     });
     scene.push(DrawCmd::Thumbnail {
         rect: card_rect,
         radius: style::card::RADIUS,
         corners: Corners::ALL,
         thumb: &wallpaper.thumb,
+        shift_x,
+        opacity,
     });
     scene.push(DrawCmd::StrokeRoundRect {
         rect: outset_rect(card_rect, style::selection::RING_OUTSET),
         radius: style::card::RADIUS + style::selection::RING_OUTSET,
         corners: Corners::ALL,
         width: style::selection::RING_WIDTH,
-        color: accent.with_alpha(style::selection::RING_ALPHA),
+        color: fade(accent.with_alpha(style::selection::RING_ALPHA), opacity),
     });
-    push_card_label(scene, card_rect, wallpaper);
+    push_card_label(scene, card_rect, wallpaper, opacity);
 }
 
 /// Bottom gradient plus the wallpaper name, over any card rect.
-fn push_card_label<'a>(scene: &mut Scene<'a>, card_rect: Rect, wallpaper: &'a Wallpaper) {
+fn push_card_label<'a>(
+    scene: &mut Scene<'a>,
+    card_rect: Rect,
+    wallpaper: &'a Wallpaper,
+    opacity: f32,
+) {
     let image_bottom = card_rect.y + card_rect.h - style::label::SELECTED_STRIP_HEIGHT;
 
     let overlay_rect = Rect {
@@ -184,12 +252,15 @@ fn push_card_label<'a>(scene: &mut Scene<'a>, card_rect: Rect, wallpaper: &'a Wa
             bottom_right: true,
             bottom_left: true,
         },
-        bottom_color: Color {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: style::label::GRADIENT_BOTTOM_ALPHA,
-        },
+        bottom_color: fade(
+            Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: style::label::GRADIENT_BOTTOM_ALPHA,
+            },
+            opacity,
+        ),
         top_alpha: 0,
     });
     let label_rect = Rect {
@@ -207,13 +278,13 @@ fn push_card_label<'a>(scene: &mut Scene<'a>, card_rect: Rect, wallpaper: &'a Wa
         rect: shadow_rect,
         text: &wallpaper.label,
         font_size: style::label::FONT_SIZE,
-        color: Color::TEXT_SHADOW,
+        color: fade(Color::TEXT_SHADOW, opacity),
     });
     scene.push(DrawCmd::Text {
         rect: label_rect,
         text: &wallpaper.label,
         font_size: style::label::FONT_SIZE,
-        color: Color::TEXT_ON_SELECTED,
+        color: fade(Color::TEXT_ON_SELECTED, opacity),
     });
 }
 
@@ -221,25 +292,29 @@ fn push_inactive_card<'a>(
     scene: &mut Scene<'a>,
     card_rect: Rect,
     wallpaper: &'a Wallpaper,
-    distance: usize,
+    distance: f32,
+    shift_x: i32,
+    opacity: f32,
 ) {
     scene.push(DrawCmd::RoundRect {
         rect: card_rect,
         radius: style::card::RADIUS,
         corners: Corners::ALL,
-        color: Color::CARD_BG,
+        color: fade(Color::CARD_BG, opacity),
     });
     scene.push(DrawCmd::Thumbnail {
         rect: card_rect,
         radius: style::card::RADIUS,
         corners: Corners::ALL,
         thumb: &wallpaper.thumb,
+        shift_x,
+        opacity,
     });
     scene.push(DrawCmd::RoundRect {
         rect: card_rect,
         radius: style::card::RADIUS,
         corners: Corners::ALL,
-        color: inactive_dim_color(distance),
+        color: fade(inactive_dim_color(distance), opacity),
     });
     // Glass hairline: separates the card from the panel and dark thumbs.
     scene.push(DrawCmd::StrokeRoundRect {
@@ -247,12 +322,12 @@ fn push_inactive_card<'a>(
         radius: style::card::RADIUS,
         corners: Corners::ALL,
         width: 1.0,
-        color: Color::CARD_HAIRLINE,
+        color: fade(Color::CARD_HAIRLINE, opacity),
     });
 }
 
 /// Accent dot marking the wallpaper that is currently applied.
-fn push_applied_badge(scene: &mut Scene<'_>, card_rect: Rect, accent: Color) {
+fn push_applied_badge(scene: &mut Scene<'_>, card_rect: Rect, accent: Color, opacity: f32) {
     let outer = style::selection::BADGE_OUTER;
     let inner = style::selection::BADGE_INNER;
     let margin = style::selection::BADGE_MARGIN;
@@ -275,21 +350,21 @@ fn push_applied_badge(scene: &mut Scene<'_>, card_rect: Rect, accent: Color) {
         rect: outer_rect,
         radius: outer / 2,
         corners: Corners::ALL,
-        color: Color::CARD_BG,
+        color: fade(Color::CARD_BG, opacity),
     });
     scene.push(DrawCmd::RoundRect {
         rect: inner_rect,
         radius: inner / 2,
         corners: Corners::ALL,
-        color: accent,
+        color: fade(accent, opacity),
     });
 }
 
-/// Muted key guide at the bottom edge of the panel.
+/// Muted key guide, floating just below the panel.
 fn push_keyboard_hints(scene: &mut Scene<'_>, panel: Rect) {
     let hint_rect = Rect {
         x: panel.x,
-        y: panel.y + panel.h - style::hints::STRIP_HEIGHT,
+        y: panel.y + panel.h + style::hints::PANEL_GAP,
         w: panel.w,
         h: style::hints::STRIP_HEIGHT,
     };
@@ -318,41 +393,52 @@ fn outset_rect(rect: Rect, amount: i32) -> Rect {
         h: rect.h + amount * 2,
     }
 }
-fn wallpaper_distance(index: usize, selected: usize, count: usize) -> usize {
-    if count == 0 {
-        return 0;
-    }
-    let forward = (index + count - selected) % count;
-    let backward = (selected + count - index) % count;
-    forward.min(backward)
+/// Fracción de rotación 3D de una card según su offset con signo al
+/// centro. Rampa continua: 0 en el centro, ±1 (ángulo máximo) a
+/// RAMP_CARDS de distancia. El signo hace que ambos lados "miren" hacia
+/// el centro del carrusel.
+fn card_tilt(offset: f32) -> f32 {
+    (offset / style::card3d::RAMP_CARDS).clamp(-1.0, 1.0)
 }
-fn inactive_dim_color(distance: usize) -> Color {
-    let alpha = style::card::INACTIVE_DIM_BASE_ALPHA as usize
-        + distance
-            .saturating_sub(1)
-            .saturating_mul(style::card::INACTIVE_DIM_STEP_ALPHA as usize);
+
+/// Paneo parallax: la imagen se corre en sentido opuesto al offset de la
+/// card respecto del centro de pantalla, como una ventana hacia una capa
+/// más profunda. Al navegar, las cards cambian de posición y la imagen
+/// interior panea con ellas. `draw_thumbnail` recorta el paneo al bleed
+/// disponible, así que acá no hace falta clamp.
+fn parallax_shift(card_rect: Rect, screen_w: i32) -> i32 {
+    let card_center = card_rect.x + card_rect.w / 2;
+    let screen_center = screen_w / 2;
+    -((card_center - screen_center) * style::parallax::STRENGTH_PERCENT / 100)
+}
+
+/// Atenuación continua: crece con la distancia fraccional al centro, así
+/// el oscurecimiento anima suave durante el scroll. En reposo (distancias
+/// enteras) coincide con los valores del esquema original.
+fn inactive_dim_color(distance: f32) -> Color {
+    let steps = (distance - 1.0).max(0.0);
+    let alpha = style::card::INACTIVE_DIM_BASE_ALPHA as f32
+        + steps * style::card::INACTIVE_DIM_STEP_ALPHA as f32;
     Color {
-        a: alpha.min(style::card::INACTIVE_DIM_MAX_ALPHA as usize) as u8,
+        a: alpha.min(style::card::INACTIVE_DIM_MAX_ALPHA as f32).round() as u8,
         ..Color::CARD_DIM
     }
 }
+
+/// Multiplica el alpha de un color por la opacidad de la card.
+fn fade(color: Color, opacity: f32) -> Color {
+    if opacity >= 1.0 {
+        return color;
+    }
+    color.with_alpha((color.a as f32 * opacity.max(0.0)).round() as u8)
+}
+
+/// El panel se dimensiona con los límites del contenido EN REPOSO que
+/// reporta el layout (no con las cards visibles): durante el scroll hay
+/// cards deslizándose por el padding y el panel no debe "respirar".
 fn carousel_panel_rect(app_width: u32, app_height: u32, layout: &Layout) -> Rect {
     let screen_w = app_width as i32;
-    let content_bounds: Option<(i32, i32)> =
-        layout
-            .cards
-            .iter()
-            .fold(None, |bounds: Option<(i32, i32)>, (_, rect)| {
-                let left = rect.x;
-                let right = rect.x + rect.w;
-                Some(match bounds {
-                    Some((cl, cr)) => (cl.min(left), cr.max(right)),
-                    None => (left, right),
-                })
-            });
-    let content_w = content_bounds
-        .map(|(l, r)| r - l)
-        .unwrap_or(style::card::WIDTH);
+    let content_w = (layout.content_right - layout.content_left).max(style::card::WIDTH);
     let max_panel_w = screen_w - style::panel::MIN_SCREEN_MARGIN * 2;
     let panel_w = (content_w + style::panel::HORIZONTAL_PADDING * 2)
         .min(max_panel_w)

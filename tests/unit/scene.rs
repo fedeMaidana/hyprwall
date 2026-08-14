@@ -1,4 +1,5 @@
 use super::*;
+use crate::layout::CardSlot;
 use crate::wallpaper::Thumbnail;
 use std::path::PathBuf;
 
@@ -55,20 +56,30 @@ fn three_wallpapers() -> Vec<Wallpaper> {
 }
 
 fn fake_layout(count: usize) -> Layout {
-    let cards = (0..count)
-        .map(|i| {
-            (
-                i,
-                Rect {
-                    x: (i as i32) * 220,
-                    y: 100,
-                    w: 200,
-                    h: 284,
-                },
-            )
+    let cards: Vec<CardSlot> = (0..count)
+        .map(|i| CardSlot {
+            index: i,
+            rect: Rect {
+                x: (i as i32) * 220,
+                y: 100,
+                w: 200,
+                h: 284,
+            },
+            offset: i as f32,
+            opacity: 1.0,
         })
         .collect();
-    Layout { cards }
+
+    let content_right = cards
+        .last()
+        .map(|card| card.rect.x + card.rect.w)
+        .unwrap_or(0);
+
+    Layout {
+        cards,
+        content_left: 0,
+        content_right,
+    }
 }
 
 fn count_round_rects(scene: &Scene<'_>) -> usize {

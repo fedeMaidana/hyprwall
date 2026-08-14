@@ -6,7 +6,7 @@ use tiny_skia::Pixmap;
 use crate::{
     geometry::Rect,
     render::{
-        draw::{draw_thumbnail, fill_round_rect, fill_vertical_gradient, stroke_round_rect},
+        draw::{CardWarp, draw_thumbnail, fill_round_rect, fill_vertical_gradient, stroke_round_rect},
         scene::{DrawCmd, Scene},
         text::draw_text_centered_in_rect,
     },
@@ -25,36 +25,76 @@ pub fn rasterize(
         return;
     };
 
+    // Proyección vigente del grupo BeginTilt/EndTilt (rotación 3D en
+    // perspectiva de las cards laterales). None fuera de los grupos.
+    let mut warp: Option<CardWarp> = None;
+
     for cmd in &scene.commands {
         match scale_cmd(cmd, scale) {
+            DrawCmd::BeginTilt {
+                pivot_x,
+                pivot_y,
+                tilt,
+                ref_width,
+            } => {
+                warp = Some(CardWarp::new(pivot_x, pivot_y, tilt, ref_width));
+            }
+            DrawCmd::EndTilt => warp = None,
             DrawCmd::RoundRect {
                 rect,
                 radius,
                 corners,
                 color,
-            } => fill_round_rect(&mut pixmap, rect, radius, corners, color),
+            } => fill_round_rect(&mut pixmap, rect, radius, corners, color, warp.as_ref()),
             DrawCmd::StrokeRoundRect {
                 rect,
                 radius,
                 corners,
                 width,
                 color,
-            } => stroke_round_rect(&mut pixmap, rect, radius, corners, width, color),
+            } => stroke_round_rect(
+                &mut pixmap,
+                rect,
+                radius,
+                corners,
+                width,
+                color,
+                warp.as_ref(),
+            ),
             DrawCmd::VerticalGradient {
                 rect,
                 radius,
                 corners,
                 bottom_color,
                 top_alpha,
-            } => {
-                fill_vertical_gradient(&mut pixmap, rect, radius, corners, bottom_color, top_alpha)
-            }
+            } => fill_vertical_gradient(
+                &mut pixmap,
+                rect,
+                radius,
+                corners,
+                bottom_color,
+                top_alpha,
+                warp.as_ref(),
+            ),
             DrawCmd::Thumbnail {
                 rect,
                 radius,
                 corners,
                 thumb,
-            } => draw_thumbnail(&mut pixmap, rect, radius, corners, thumb),
+                shift_x,
+                opacity,
+            } => draw_thumbnail(
+                &mut pixmap,
+                rect,
+                radius,
+                corners,
+                thumb,
+                shift_x,
+                opacity,
+                warp.as_ref(),
+            ),
+            // El texto se dibuja directo al buffer (sin paths): queda sin
+            // inclinar a propósito — etiquetas siempre derechas.
             DrawCmd::Text {
                 rect,
                 text,
@@ -122,11 +162,15 @@ fn scale_cmd<'a>(cmd: &DrawCmd<'a>, scale: f32) -> DrawCmd<'a> {
             radius,
             corners,
             thumb,
+            shift_x,
+            opacity,
         } => DrawCmd::Thumbnail {
             rect: scale_rect(rect, scale),
             radius: scale_len(radius, scale),
             corners,
             thumb,
+            shift_x: scale_len(shift_x, scale),
+            opacity,
         },
         DrawCmd::Text {
             rect,
@@ -139,6 +183,19 @@ fn scale_cmd<'a>(cmd: &DrawCmd<'a>, scale: f32) -> DrawCmd<'a> {
             font_size: font_size * scale,
             color,
         },
+        DrawCmd::BeginTilt {
+            pivot_x,
+            pivot_y,
+            tilt,
+            ref_width,
+        } => DrawCmd::BeginTilt {
+            pivot_x: pivot_x * scale,
+            pivot_y: pivot_y * scale,
+            // tilt es adimensional; ref_width es una longitud y escala.
+            tilt,
+            ref_width: ref_width * scale,
+        },
+        DrawCmd::EndTilt => DrawCmd::EndTilt,
     }
 }
 

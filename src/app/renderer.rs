@@ -35,6 +35,9 @@ impl AppState {
         let phys_h = logical_h * scale;
         let stride = phys_w as i32 * 4;
 
+        // Avanza la animación del carrusel antes de posicionar las cards.
+        self.model.picker.tick();
+
         let layout = self
             .model
             .picker

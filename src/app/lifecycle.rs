@@ -52,12 +52,18 @@ impl CompositorHandler for AppState {
     fn frame(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
         self.redraw_scheduled = false;
         self.render_now();
+
+        // Mientras el carrusel persigue su objetivo, cada frame pide el
+        // siguiente: este es el loop de animación del scroll fluido.
+        if self.model.picker.is_animating() {
+            self.request_redraw(qh);
+        }
     }
 
     fn surface_enter(

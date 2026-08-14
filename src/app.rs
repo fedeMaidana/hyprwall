@@ -188,6 +188,11 @@ impl AppState {
                     self.request_redraw(qh);
                 } else {
                     self.render_now();
+                    // Si el primer render arranca ya animando (p. ej. un
+                    // scroll tempranero), hay que encadenar el próximo frame.
+                    if self.model.picker.is_animating() {
+                        self.request_redraw(qh);
+                    }
                 }
                 None
             }

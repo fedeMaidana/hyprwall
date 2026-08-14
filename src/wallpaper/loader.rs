@@ -50,7 +50,10 @@ pub fn scan_wallpapers(dir: &Path) -> Result<Vec<Wallpaper>> {
 pub fn load_wallpaper(path: &Path) -> Result<Wallpaper> {
     let image = image::open(path).with_context(|| format!("image::open {}", path.display()))?;
 
-    let decode_w = style::card::WIDTH as u32 * style::card::THUMB_DECODE_SCALE;
+    // Se decodifica con "bleed" horizontal: imagen extra a cada lado que
+    // draw_thumbnail usa para el paneo parallax sin descubrir el fondo.
+    let decode_w =
+        (style::card::WIDTH + style::parallax::BLEED * 2) as u32 * style::card::THUMB_DECODE_SCALE;
     let decode_h = style::card::HEIGHT as u32 * style::card::THUMB_DECODE_SCALE;
 
     let thumb = image

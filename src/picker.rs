@@ -15,6 +15,9 @@ pub struct Picker {
     pos: f32,
     /// A dónde está yendo `pos`. La selección lógica es round(target).
     target: f32,
+    /// Velocidad actual del resorte (cards/s). Se conserva entre
+    /// retargets: encadenar scrolls fluye en vez de sacudir.
+    vel: f32,
     last_tick: Option<Instant>,
     hovered: Option<usize>,
     applied: Option<usize>,
@@ -32,6 +35,7 @@ impl Picker {
             wallpapers,
             pos: selected as f32,
             target: selected as f32,
+            vel: 0.0,
             last_tick: None,
             hovered: None,
             applied: None,
@@ -75,10 +79,12 @@ impl Picker {
     /// ¿La posición sigue persiguiendo al objetivo?
     pub fn is_animating(&self) -> bool {
         (self.target - self.pos).abs() > style::scroll::SNAP_EPS
+            || self.vel.abs() > style::scroll::SNAP_VEL_EPS
     }
 
-    /// Avanza un paso de animación (suavizado exponencial hacia el
-    /// objetivo). Devuelve true si hace falta otro frame.
+    /// Avanza un paso de animación. Resorte críticamente amortiguado con
+    /// solución exacta: arranca suave desde velocidad cero, acelera y
+    /// asienta sin rebote. Devuelve true si hace falta otro frame.
     pub fn tick(&mut self) -> bool {
         if self.wallpapers.is_empty() {
             return false;
@@ -96,8 +102,16 @@ impl Picker {
             .min(style::scroll::MAX_FRAME_DT);
         self.last_tick = Some(now);
 
-        let follow = 1.0 - (-style::scroll::SMOOTH_RATE * dt).exp();
-        self.pos += (self.target - self.pos) * follow;
+        if dt > 0.0 {
+            // x(t) = target + (a + b·t)·e^(−ω·t), con a = pos − target y
+            // b = vel + ω·a. Integración exacta: estable con cualquier dt.
+            let omega = style::scroll::SPRING_OMEGA;
+            let e = (-omega * dt).exp();
+            let a = self.pos - self.target;
+            let b = self.vel + omega * a;
+            self.pos = self.target + (a + b * dt) * e;
+            self.vel = (self.vel - omega * b * dt) * e;
+        }
 
         if !self.is_animating() {
             self.settle();
@@ -111,6 +125,7 @@ impl Picker {
         let count = self.wallpapers.len() as f32;
         self.pos = self.target.rem_euclid(count);
         self.target = self.pos;
+        self.vel = 0.0;
         self.last_tick = None;
     }
 

@@ -86,6 +86,10 @@ impl Picker {
     /// solución exacta: arranca suave desde velocidad cero, acelera y
     /// asienta sin rebote. Devuelve true si hace falta otro frame.
     pub fn tick(&mut self) -> bool {
+        self.tick_at(Instant::now())
+    }
+
+    fn tick_at(&mut self, now: Instant) -> bool {
         if self.wallpapers.is_empty() {
             return false;
         }
@@ -94,12 +98,10 @@ impl Picker {
             return false;
         }
 
-        let now = Instant::now();
         let dt = self
             .last_tick
             .map(|t| now.duration_since(t).as_secs_f32())
-            .unwrap_or(0.0)
-            .min(style::scroll::MAX_FRAME_DT);
+            .unwrap_or(0.0);
         self.last_tick = Some(now);
 
         if dt > 0.0 {
@@ -129,6 +131,16 @@ impl Picker {
         self.last_tick = None;
     }
 
+    /// Integra hasta la llegada del input con el objetivo anterior antes
+    /// de moverlo. El delta sigue siendo válido si tick_at normaliza el
+    /// carrusel al asentarse, y el primer frame ya cuenta el tiempo desde
+    /// el input incluso cuando la animación estaba en reposo.
+    fn retarget_by_at(&mut self, delta: f32, now: Instant) {
+        self.tick_at(now);
+        self.target += delta;
+        self.last_tick = Some(now);
+    }
+
     pub fn select_prev(&mut self) -> bool {
         self.nudge(-1.0)
     }
@@ -141,7 +153,8 @@ impl Picker {
         if self.wallpapers.len() < 2 {
             return false;
         }
-        self.target = self.target.round() + delta;
+        let target = self.target.round() + delta;
+        self.retarget_by_at(target - self.target, Instant::now());
         true
     }
 
@@ -151,7 +164,10 @@ impl Picker {
         if self.wallpapers.len() < 2 || notches == 0.0 {
             return false;
         }
-        self.target += notches * style::scroll::WHEEL_CARDS_PER_NOTCH;
+        self.retarget_by_at(
+            notches * style::scroll::WHEEL_CARDS_PER_NOTCH,
+            Instant::now(),
+        );
         true
     }
 
@@ -171,7 +187,7 @@ impl Picker {
         if delta >= count / 2.0 {
             delta -= count;
         }
-        self.target = anchor + delta;
+        self.retarget_by_at(anchor + delta - self.target, Instant::now());
         true
     }
 

@@ -117,7 +117,7 @@ fn scrim_covers_everything_then_panel_follows() {
 #[test]
 fn selected_card_emits_thumbnail_and_label() {
     let wallpapers = three_wallpapers();
-    let layout = fake_layout(3);
+    let layout = crate::layout::compute(1280, 560, wallpapers.len(), 1.0);
     let scene = build(&layout, &wallpapers, 1, None);
 
     let expected_thumb = &wallpapers[1].thumb;
@@ -197,4 +197,95 @@ fn empty_layout_emits_scrim_panel_and_hints() {
     assert!(matches!(scene.commands[0], DrawCmd::RoundRect { .. }));
     assert!(matches!(scene.commands[1], DrawCmd::RoundRect { .. }));
     assert!(matches!(scene.commands[2], DrawCmd::Text { .. }));
+}
+
+fn label_alpha(scene: &Scene<'_>, label: &str) -> u8 {
+    scene
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            DrawCmd::Text { text, color, .. }
+                if *text == label && color.r == Color::TEXT_ON_SELECTED.r =>
+            {
+                Some(color.a)
+            }
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+#[test]
+fn navigation_crossfades_labels_and_rings_in_both_directions_and_across_wrap() {
+    let wallpapers = three_wallpapers();
+    for (start, direction, outgoing, incoming) in [
+        (0.0, 1.0, 0, 1),
+        (1.0, -1.0, 1, 0),
+        (2.0, 1.0, 2, 0),
+        (0.0, -1.0, 0, 2),
+    ] {
+        let mut previous_out = 255;
+        let mut previous_in = 0;
+        for progress in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let layout =
+                crate::layout::compute(1280, 560, wallpapers.len(), start + direction * progress);
+            let scene = build(&layout, &wallpapers, incoming, None);
+            let out_alpha = label_alpha(&scene, &wallpapers[outgoing].label);
+            let in_alpha = label_alpha(&scene, &wallpapers[incoming].label);
+            assert!(out_alpha <= previous_out);
+            assert!(in_alpha >= previous_in);
+            assert!((out_alpha as i32 + in_alpha as i32 - 255).abs() <= 1);
+            if progress == 0.0 {
+                assert_eq!((out_alpha, in_alpha), (255, 0));
+            } else if progress == 1.0 {
+                assert_eq!((out_alpha, in_alpha), (0, 255));
+            } else {
+                assert!(out_alpha > 0 && out_alpha < 255);
+                assert!(in_alpha > 0 && in_alpha < 255);
+                let rings: Vec<_> = scene
+                    .commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        DrawCmd::StrokeRoundRect { radius, color, .. }
+                            if *radius == style::card::RADIUS + style::selection::RING_OUTSET =>
+                        {
+                            Some(color.a)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(rings.len(), 2);
+                assert!(
+                    rings
+                        .iter()
+                        .all(|&alpha| alpha > 0 && alpha < style::selection::RING_ALPHA)
+                );
+            }
+            previous_out = out_alpha;
+            previous_in = in_alpha;
+        }
+    }
+}
+
+#[test]
+fn retargeting_does_not_jump_the_visible_emphasis() {
+    let wallpapers = three_wallpapers();
+    let layout = crate::layout::compute(1280, 560, wallpapers.len(), 0.25);
+    let before = build(&layout, &wallpapers, 1, None);
+    let after = build(&layout, &wallpapers, 2, None);
+    for wallpaper in &wallpapers {
+        assert_eq!(
+            label_alpha(&before, &wallpaper.label),
+            label_alpha(&after, &wallpaper.label)
+        );
+    }
+    for scene in [&before, &after] {
+        assert_eq!(
+            scene
+                .commands
+                .iter()
+                .filter(|command| matches!(command, DrawCmd::Thumbnail { .. }))
+                .count(),
+            layout.cards.len()
+        );
+    }
 }

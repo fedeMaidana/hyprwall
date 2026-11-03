@@ -18,9 +18,7 @@ use smithay_client_toolkit::{
 };
 use std::path::PathBuf;
 use wayland_client::{
-    Connection, QueueHandle,
-    globals::registry_queue_init,
-    protocol::wl_keyboard,
+    Connection, QueueHandle, globals::registry_queue_init, protocol::wl_keyboard,
 };
 
 use crate::{
@@ -28,6 +26,7 @@ use crate::{
     hyprcolor::{self, DynamicColors},
     model::{Cmd, Model, Msg, update},
     picker::Picker,
+    render::Rasterizer,
     style,
     wallpaper::{apply_wallpaper, scan_wallpapers},
 };
@@ -40,6 +39,9 @@ pub struct AppState {
     _layer_shell: LayerShell,
     pub(super) shm: Shm,
     pool: SlotPool,
+    frame_buffers: Vec<renderer::FrameBuffer>,
+    rasterizer: Rasterizer,
+    presented_generation: Option<u64>,
     pub(super) layer: LayerSurface,
 
     pub(super) redraw_scheduled: bool,
@@ -114,6 +116,9 @@ impl AppState {
             _layer_shell: layer_shell,
             shm,
             pool,
+            frame_buffers: Vec::new(),
+            rasterizer: Rasterizer::default(),
+            presented_generation: None,
             layer,
             redraw_scheduled: false,
             has_rendered: false,
@@ -187,17 +192,20 @@ impl AppState {
                 if self.has_rendered {
                     self.request_redraw(qh);
                 } else {
-                    self.render_now();
+                    let rendered = self.render_now();
                     // Si el primer render arranca ya animando (p. ej. un
                     // scroll tempranero), hay que encadenar el próximo frame.
-                    if self.model.picker.is_animating() {
+                    if !rendered || self.model.picker.is_animating() {
                         self.request_redraw(qh);
                     }
                 }
                 None
             }
             Cmd::SetBufferScale(scale) => {
-                self.layer.wl_surface().set_buffer_scale(scale);
+                // The scale is double-buffered Wayland state. Apply it in
+                // render_now with the correctly sized buffer, so a frame-only
+                // commit cannot reinterpret the previous buffer at this scale.
+                debug_assert_eq!(scale, self.model.scale);
                 None
             }
             Cmd::ApplyWallpaper(path) => Some(match apply_wallpaper(&path) {

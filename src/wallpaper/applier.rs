@@ -54,40 +54,25 @@ pub fn apply_wallpaper(path: &Path) -> Result<()> {
 
 fn apply_with_awww(path: &Path) -> Result<()> {
     ensure_awww_daemon_running()?;
-
-    let wallpaper = path.to_string_lossy().to_string();
-
-    run_command(
-        "awww",
-        &[
-            "img",
-            wallpaper.as_str(),
-            "--transition-type",
-            "grow",
-            "--transition-pos",
-            "0.85,0.15",
-            "--transition-duration",
-            "1.4",
-            "--transition-fps",
-            "60",
-        ],
-    )
+    apply_with_random_grow("awww", path)
 }
 
 fn apply_with_swww(path: &Path) -> Result<()> {
     ensure_swww_daemon_running()?;
+    apply_with_random_grow("swww", path)
+}
 
+/// `any` conserva la expansión circular de `grow` y aleatoriza su origen.
+fn apply_with_random_grow(program: &str, path: &Path) -> Result<()> {
     let wallpaper = path.to_string_lossy().to_string();
 
     run_command(
-        "swww",
+        program,
         &[
             "img",
             wallpaper.as_str(),
             "--transition-type",
-            "grow",
-            "--transition-pos",
-            "0.85,0.15",
+            "any",
             "--transition-duration",
             "1.4",
             "--transition-fps",

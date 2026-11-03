@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
     pub r: u8,
     pub g: u8,
@@ -59,18 +59,15 @@ pub mod scroll {
 
     /// Rigidez del resorte críticamente amortiguado que persigue al
     /// objetivo (rad/s). Más bajo = deslizamiento más largo y suave;
-    /// más alto = respuesta más seca. Como el resorte arranca desde
-    /// velocidad cero, el parallax se aprecia durante todo el recorrido.
-    pub const SPRING_OMEGA: f32 = 9.0;
+    /// más alto = respuesta más seca. Un paso se asienta en unos 460 ms,
+    /// conservando la aceleración suave desde velocidad cero.
+    pub const SPRING_OMEGA: f32 = 20.0;
 
     /// Distancia (en cards) bajo la cual la animación se da por asentada.
     pub const SNAP_EPS: f32 = 0.002;
 
     /// Velocidad (cards/s) bajo la cual el resorte se considera quieto.
     pub const SNAP_VEL_EPS: f32 = 0.02;
-
-    /// dt máximo por frame; protege el paso de animación tras una pausa.
-    pub const MAX_FRAME_DT: f32 = 0.05;
 
     /// Overhang (px) sobre el borde interior del panel al que una card se
     /// desvanece por completo. Debe ser menor que panel::HORIZONTAL_PADDING

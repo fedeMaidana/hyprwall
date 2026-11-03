@@ -1,4 +1,17 @@
-use fontdue::Font;
+use std::{cell::RefCell, collections::HashMap};
+
+use fontdue::{Font, Metrics};
+
+type GlyphKey = (usize, u32, char);
+type GlyphBitmap = (Metrics, Vec<u8>);
+
+thread_local! {
+    // Crossfading labels changes only their color/opacity, not their glyphs.
+    // Bound the cache for large wallpaper collections and scale changes.
+    static GLYPHS: RefCell<HashMap<GlyphKey, GlyphBitmap>> = RefCell::new(HashMap::new());
+}
+
+const MAX_CACHED_GLYPHS: usize = 512;
 
 use crate::{
     geometry::Rect,
@@ -36,6 +49,49 @@ pub fn draw_text_centered_in_rect(
     );
 }
 
+/// Exact glyph bounds, including overhang, for partial redraws.
+pub(super) fn text_bounds(font: &Font, text: &str, font_size: f32, rect: Rect) -> Option<Rect> {
+    let text = fit_text_to_width(font, text, font_size, rect.w as f32);
+    let text_w = measure_text_width(font, &text, font_size);
+    let line_metrics = font.horizontal_line_metrics(font_size)?;
+    let line_h = line_metrics.ascent - line_metrics.descent;
+    let baseline = rect.y as f32 + (rect.h as f32 - line_h) / 2.0 + line_metrics.ascent;
+    let mut pen_x = rect.x as f32 + (rect.w as f32 - text_w) / 2.0;
+    let mut bounds: Option<Rect> = None;
+    for ch in text.chars() {
+        let metrics = font.metrics(ch, font_size);
+        if metrics.width > 0 && metrics.height > 0 {
+            let x = pen_x.round() as i32 + metrics.xmin;
+            let y = (baseline - metrics.ymin as f32 - metrics.height as f32).round() as i32;
+            let right = x + metrics.width as i32;
+            let bottom = y + metrics.height as i32;
+            bounds = Some(match bounds {
+                None => Rect {
+                    x,
+                    y,
+                    w: right - x,
+                    h: bottom - y,
+                },
+                Some(old) => {
+                    let x0 = x.min(old.x);
+                    let y0 = y.min(old.y);
+                    Rect {
+                        x: x0,
+                        y: y0,
+                        w: right.max(old.x + old.w) - x0,
+                        h: bottom.max(old.y + old.h) - y0,
+                    }
+                }
+            });
+        }
+        pen_x += metrics.advance_width;
+        if !ch.is_whitespace() {
+            pen_x += style::label::LETTER_SPACING;
+        }
+    }
+    bounds
+}
+
 fn draw_text_baseline(
     canvas: &mut [u8],
     surface_w: u32,
@@ -49,47 +105,56 @@ fn draw_text_baseline(
 ) {
     let mut pen_x = x;
 
-    for ch in text.chars() {
-        let (metrics, bitmap) = font.rasterize(ch, font_size);
+    GLYPHS.with(|glyphs| {
+        let mut glyphs = glyphs.borrow_mut();
+        for ch in text.chars() {
+            let key = (font.file_hash(), font_size.to_bits(), ch);
+            if glyphs.len() >= MAX_CACHED_GLYPHS && !glyphs.contains_key(&key) {
+                glyphs.clear();
+            }
+            let (metrics, bitmap) = glyphs
+                .entry(key)
+                .or_insert_with(|| font.rasterize(ch, font_size));
 
-        let glyph_x = pen_x.round() as i32 + metrics.xmin;
-        let glyph_y = (baseline - metrics.ymin as f32 - metrics.height as f32).round() as i32;
+            let glyph_x = pen_x.round() as i32 + metrics.xmin;
+            let glyph_y = (baseline - metrics.ymin as f32 - metrics.height as f32).round() as i32;
 
-        for gy in 0..metrics.height {
-            for gx in 0..metrics.width {
-                let alpha = bitmap[gy * metrics.width + gx];
+            for gy in 0..metrics.height {
+                for gx in 0..metrics.width {
+                    let alpha = bitmap[gy * metrics.width + gx];
 
-                if alpha == 0 {
-                    continue;
+                    if alpha == 0 {
+                        continue;
+                    }
+
+                    let px = glyph_x + gx as i32;
+                    let py = glyph_y + gy as i32;
+
+                    if px < 0 || py < 0 || px >= surface_w as i32 || py >= surface_h as i32 {
+                        continue;
+                    }
+
+                    blend_pixel_rgba(
+                        canvas,
+                        surface_w,
+                        px,
+                        py,
+                        Color {
+                            a: scale_alpha(color.a, alpha),
+                            ..color
+                        },
+                    );
                 }
+            }
 
-                let px = glyph_x + gx as i32;
-                let py = glyph_y + gy as i32;
+            pen_x += metrics.advance_width;
 
-                if px < 0 || py < 0 || px >= surface_w as i32 || py >= surface_h as i32 {
-                    continue;
-                }
-
-                blend_pixel_rgba(
-                    canvas,
-                    surface_w,
-                    px,
-                    py,
-                    Color {
-                        a: scale_alpha(color.a, alpha),
-                        ..color
-                    },
-                );
+            // Compactamos un poco solo entre letras, no después de espacios.
+            if !ch.is_whitespace() {
+                pen_x += style::label::LETTER_SPACING;
             }
         }
-
-        pen_x += metrics.advance_width;
-
-        // Compactamos un poco solo entre letras, no después de espacios.
-        if !ch.is_whitespace() {
-            pen_x += style::label::LETTER_SPACING;
-        }
-    }
+    });
 }
 
 fn measure_text_width(font: &Font, text: &str, font_size: f32) -> f32 {

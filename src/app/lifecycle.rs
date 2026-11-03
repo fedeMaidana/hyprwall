@@ -57,11 +57,12 @@ impl CompositorHandler for AppState {
         _time: u32,
     ) {
         self.redraw_scheduled = false;
-        self.render_now();
+        let rendered = self.render_now();
 
         // Mientras el carrusel persigue su objetivo, cada frame pide el
-        // siguiente: este es el loop de animación del scroll fluido.
-        if self.model.picker.is_animating() {
+        // siguiente. También reintenta si el compositor aún retenía los
+        // buffers: no debemos perder el último frame de la animación.
+        if !rendered || self.model.picker.is_animating() {
             self.request_redraw(qh);
         }
     }
@@ -145,10 +146,13 @@ impl SeatHandler for AppState {
         if capability == Capability::Pointer && self.themed_pointer.is_none() {
             let surface = self.compositor.create_surface(qh);
 
-            match self
-                .seat_state
-                .get_pointer_with_theme(qh, &seat, self.shm.wl_shm(), surface, ThemeSpec::default())
-            {
+            match self.seat_state.get_pointer_with_theme(
+                qh,
+                &seat,
+                self.shm.wl_shm(),
+                surface,
+                ThemeSpec::default(),
+            ) {
                 Ok(pointer) => self.themed_pointer = Some(pointer),
                 Err(err) => log::warn!("no se pudo crear themed pointer: {err:?}"),
             }
